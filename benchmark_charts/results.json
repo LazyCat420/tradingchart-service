@@ -1,0 +1,22 @@
+[
+  {
+    "symbol": "NVDA",
+    "status": "error",
+    "analysis": "",
+    "reasoning": "",
+    "strategy_name": "",
+    "confidence": 0,
+    "iterations": 3,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "symbol": "AAPL",
+    "status": "error",
+    "analysis": "",
+    "reasoning": "",
+    "strategy_name": "",
+    "confidence": 0,
+    "iterations": 2,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  }
+]

@@ -1,0 +1,17 @@
+[
+    {
+        "image_path": "data/images/trading_chart_1.png",
+        "prompt": "This is a trading chart. Please extract the highest price and the lowest price shown in this chart. Also describe the overall trend.",
+        "category": "Trading Charts"
+    },
+    {
+        "image_path": "data/images/small_text_doc.png",
+        "prompt": "This is a receipt. Can you read the total amount and identify any specific items and their prices? Please list all the small text you can read.",
+        "category": "Small Details"
+    },
+    {
+        "image_path": "data/images/complex_scene.png",
+        "prompt": "Describe this complex scene in detail. What are the main objects and colors? Can you read the large text visible?",
+        "category": "General Description"
+    }
+]

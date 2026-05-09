@@ -1,0 +1,79 @@
+[
+  {
+    "iteration": 1,
+    "timestamp": "2026-05-07T21:42:58.326989",
+    "strategy_name": "Trend-Following with Volume Confirmation",
+    "confidence": 0.78,
+    "analysis": "Price shows strong uptrend with RSI averaging 62-68 (bullish but not overbought). ATR of 4.2 indicates moderate volatility. Support trendline has 3 confirmed touches with Z-score of +1.8 above 20-day MA. Volume voids at 175-185 and 199-204 suggest potential fill zones. Fibonacci 61.8% retracement from 164.27 to 216.83 sits at 184.50, acting as dynamic support.",
+    "reasoning": "",
+    "overlays": [
+      {
+        "kind": "line",
+        "x0": "2026-03-30",
+        "y0": 164.27,
+        "x1": "2026-05-05",
+        "y1": 196.03,
+        "color": "green",
+        "label": "Support Trendline (Higher Lows)"
+      },
+      {
+        "kind": "line",
+        "x0": "2026-04-14",
+        "y0": 196.51,
+        "x1": "2026-04-27",
+        "y1": 216.83,
+        "color": "red",
+        "label": "Resistance Trendline (Higher Highs)"
+      },
+      {
+        "kind": "zone",
+        "x0": "2026-05-04",
+        "x1": "2026-05-05",
+        "y0": 194.74,
+        "y1": 197.12,
+        "color": "blue",
+        "label": "Demand Zone (Consolidation Support)"
+      },
+      {
+        "kind": "zone",
+        "x0": "2026-04-27",
+        "x1": "2026-04-28",
+        "y0": 214.73,
+        "y1": 216.83,
+        "color": "orange",
+        "label": "Supply Zone (Recent High)"
+      },
+      {
+        "kind": "volume_void",
+        "x0": "2026-04-06",
+        "x1": "2026-04-08",
+        "y0": 175.76,
+        "y1": 185.26,
+        "color": "purple",
+        "label": "Liquidity Void (Low Vol Gap)"
+      },
+      {
+        "kind": "volume_void",
+        "x0": "2026-04-21",
+        "x1": "2026-04-23",
+        "y0": 199.0,
+        "y1": 203.83,
+        "color": "purple",
+        "label": "Liquidity Void (Consolidation Gap)"
+      }
+    ],
+    "status": "success"
+  },
+  {
+    "iteration": 2,
+    "timestamp": "2026-05-07T21:45:02.602257",
+    "status": "error",
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "iteration": 3,
+    "timestamp": "2026-05-07T21:48:41.857500",
+    "status": "error",
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  }
+]

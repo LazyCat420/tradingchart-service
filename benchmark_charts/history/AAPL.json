@@ -1,0 +1,91 @@
+[
+  {
+    "iteration": 1,
+    "timestamp": "2026-05-07T21:53:28.501866",
+    "strategy_name": "Trend-Volume Confluence",
+    "confidence": 0.78,
+    "analysis": "Price shows bullish momentum with RSI approaching overbought (70+) on May 7 close. ATR expansion from 2.5 to 4.2 indicates volatility increase. Support trendline at 265-267 zone holds with Fibonacci 0.618 retracement at 266.43. Volume voids suggest potential gap fill opportunities.",
+    "reasoning": "",
+    "overlays": [
+      {
+        "kind": "line",
+        "x0": "2026-03-30",
+        "y0": 245.51,
+        "x1": "2026-04-27",
+        "y1": 265.07,
+        "color": "green",
+        "label": "Support Trendline"
+      },
+      {
+        "kind": "line",
+        "x0": "2026-04-01",
+        "y0": 256.18,
+        "x1": "2026-05-07",
+        "y1": 292.13,
+        "color": "red",
+        "label": "Resistance Trendline"
+      },
+      {
+        "kind": "line",
+        "x0": "2026-04-15",
+        "y0": 266.43,
+        "x1": "2026-05-07",
+        "y1": 287.44,
+        "color": "green",
+        "label": "Uptrend Channel"
+      },
+      {
+        "kind": "zone",
+        "x0": "2026-03-30",
+        "x1": "2026-03-31",
+        "y0": 245.51,
+        "y1": 250.0,
+        "color": "blue",
+        "label": "Demand Zone"
+      },
+      {
+        "kind": "zone",
+        "x0": "2026-04-27",
+        "x1": "2026-04-29",
+        "y0": 265.07,
+        "y1": 270.0,
+        "color": "blue",
+        "label": "Demand Zone"
+      },
+      {
+        "kind": "zone",
+        "x0": "2026-05-06",
+        "x1": "2026-05-07",
+        "y0": 287.0,
+        "y1": 292.13,
+        "color": "orange",
+        "label": "Supply Zone"
+      },
+      {
+        "kind": "volume_void",
+        "x0": "2026-04-09",
+        "x1": "2026-04-10",
+        "y0": 259.0,
+        "y1": 262.19,
+        "color": "purple",
+        "label": "Low Volume Consolidation"
+      },
+      {
+        "kind": "volume_void",
+        "x0": "2026-04-29",
+        "x1": "2026-04-30",
+        "y0": 267.04,
+        "y1": 276.0,
+        "color": "purple",
+        "label": "Gap Fill Void"
+      }
+    ],
+    "status": "success"
+  },
+  {
+    "iteration": 2,
+    "timestamp": "2026-05-07T22:00:17.764697",
+    "status": "error",
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  }
+]

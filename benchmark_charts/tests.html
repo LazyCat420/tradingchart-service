@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<title>Agentic Quant Lab — Unit Tests</title>
+<style>
+body{font-family:'JetBrains Mono',monospace;background:#0b1120;color:#e2e8f0;padding:20px;font-size:13px}
+h1{color:#58a6ff;margin-bottom:16px}
+.pass{color:#34d399}.fail{color:#f87171}.info{color:#8b949e}
+pre{background:#1a2234;padding:8px;border-radius:4px;margin:4px 0;font-size:11px;overflow-x:auto}
+.section{margin:16px 0 4px;color:#a78bfa;font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+</style>
+</head><body>
+<h1>◈ Agentic Quant Lab — Test Suite</h1>
+<div id="results"></div>
+
+<!-- Load the same libs as the main app -->
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script>
+// Minimal test harness
+let passed=0, failed=0, total=0;
+const out = document.getElementById('results');
+
+function assert(cond, name, detail='') {
+  total++;
+  if (cond) { passed++; log('PASS', name, detail); }
+  else { failed++; log('FAIL', name, detail); }
+}
+function log(status, name, detail) {
+  const cls = status==='PASS'?'pass':'fail';
+  out.innerHTML += `<div class="${cls}">[${status}] ${name}</div>`;
+  if (detail) out.innerHTML += `<pre class="info">${detail}</pre>`;
+}
+function section(name) {
+  out.innerHTML += `<div class="section">${name}</div>`;
+}
+function summary() {
+  out.innerHTML += `<br><div class="${failed?'fail':'pass'}">═══ ${passed}/${total} passed, ${failed} failed ═══</div>`;
+}
+</script>
+
+<!-- Inline testable functions from app.js (no DOM/network dependencies) -->
+<script>
+// ── calcEMA ──
+function calcEMA(c, span) {
+  const k = 2/(span+1), e = [c[0]];
+  for (let i=1;i<c.length;i++) e.push(c[i]*k+e[i-1]*(1-k));
+  return e;
+}
+
+// ── repairJSON ──
+function repairJSON(raw) {
+  let s = raw;
+  s = s.replace(/,\s*([}\]])/g, '$1');
+  s = s.replace(/:\s*NaN\b/g, ': null');
+  s = s.replace(/:\s*-?Infinity\b/g, ': null');
+  s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
+  if (s.includes("'") && !s.includes('"')) {
+    s = s.replace(/'/g, '"');
+  }
+  return s;
+}
+
+// ── tryCloseTruncated ──
+function tryCloseTruncated(s) {
+  let braces = 0, brackets = 0;
+  for (const ch of s) {
+    if (ch === '{') braces++;
+    else if (ch === '}') braces--;
+    else if (ch === '[') brackets++;
+    else if (ch === ']') brackets--;
+  }
+  let patched = s.replace(/,\s*"[^"]*"?\s*:?\s*$/, '');
+  patched = patched.replace(/,\s*$/, '');
+  while (brackets > 0) { patched += ']'; brackets--; }
+  while (braces > 0) { patched += '}'; braces--; }
+  return patched;
+}
+
+// ── parseResponse (with 3-step repair) ──
+function parseResponse(content, reasoning, symbol='?') {
+  let c = content.replace(/```json/g,'').replace(/```/g,'').trim();
+  if (c.includes('</think>')) c = c.slice(c.indexOf('</think>')+8).trim();
+  if (c.startsWith('<think>')) c = '';
+  const si=c.indexOf('{'), ei=c.lastIndexOf('}')+1;
+  if (si===-1||ei<=si) throw new Error('No JSON in response: '+content.slice(0,120));
+  
+  let jsonStr = c.slice(si,ei);
+  try { return {spec: JSON.parse(jsonStr), reasoning}; } catch(e1) {}
+  const repaired = repairJSON(jsonStr);
+  try { return {spec: JSON.parse(repaired), reasoning}; } catch(e2) {}
+  const closed = tryCloseTruncated(repaired);
+  try { return {spec: JSON.parse(closed), reasoning}; } catch(e3) {
+    throw new Error(`JSON parse failed after repair: ${e3.message}`);
+  }
+}
+
+// ── buildPrompt ──
+const TIMEFRAMES = {
+  short:  { id:'short',  range:'3mo', interval:'1d',  label:'3M Daily',   promptLabel:'SHORT-TERM (3 months, daily candles)' },
+  medium: { id:'medium', range:'1y',  interval:'1wk', label:'1Y Weekly',  promptLabel:'MEDIUM-TERM (1 year, weekly candles)' },
+  long:   { id:'long',   range:'5y',  interval:'1mo', label:'5Y Monthly', promptLabel:'LONG-TERM (5 years, monthly candles)' }
+};
+function buildPrompt(symbol, data, iter, prev, tfConfig) {
+  tfConfig = tfConfig || TIMEFRAMES.short;
+  const tailN = tfConfig.id === 'long' ? 60 : tfConfig.id === 'medium' ? 52 : 30;
+  const recent = data.slice(-tailN);
+  let d = "Date | Open | High | Low | Close | Volume\n";
+  recent.forEach(r => d += `${r.date} | ${r.open} | ${r.high} | ${r.low} | ${r.close} | ${r.volume}\n`);
+  let p = `You are an elite quantitative technical analyst.\nAnalyze the ${tfConfig.promptLabel} OHLCV data for ${symbol}.`;
+  if (iter > 1 && prev.length) {
+    p += "\n\n--- PREVIOUS ITERATIONS ---\n";
+    prev.forEach(x => {
+      p += `\nIteration ${x.iteration} (${x.strategy_name}, conf: ${x.confidence}):\n`;
+    });
+    p += "--- END ---\nThis is iteration " + iter + ". Try a DIFFERENT strategy. IMPROVE.\n";
+  }
+  p += "\nData:\n" + d;
+  return p;
+}
+
+// ── Model Registry (mirror of app.js) ──
+const MODELS = [
+  { id:'qwen-122b-141', name:'Qwen3.5-122B (141)', endpoint:'http://10.0.0.141:8000/v1/chat/completions', model:'Qwen/Qwen3.5-122B-A10B-FP8' },
+  { id:'model-30',      name:'Qwen3.5-35B (30)',         endpoint:'http://10.0.0.30:8000/v1/chat/completions',  model:'Kbenkhaled/Qwen3.5-35B-A3B-quantized.w4a16' },
+];
+let activeModelIdx = 0;
+function getVLLM() { return MODELS[activeModelIdx].endpoint; }
+function getMODEL() { return MODELS[activeModelIdx].model; }
+
+// ── handleAction logic (standalone for testing) ──
+function simulateHandleAction(action, ticker, tfd) {
+  const result = { statusMsg: '', analysisMsg: '', approved: false, rejected: false, reIterated: false, skipped: false, advanced: false };
+  if (action === 'APPROVE') {
+    if (tfd) { tfd.approved = true; tfd.rejected = false; }
+    ticker.approved = true;
+    result.statusMsg = `✓ ${ticker.symbol} APPROVED`;
+    result.analysisMsg = '✓ APPROVED — ' + (tfd?.analysis || 'Analysis accepted.');
+    result.approved = true;
+    result.advanced = true;
+  } else if (action === 'REJECT') {
+    if (tfd) { tfd.approved = false; tfd.rejected = true; }
+    result.statusMsg = `✗ ${ticker.symbol} REJECTED — re-iterating...`;
+    result.rejected = true;
+    result.reIterated = true;
+  } else if (action === 'SKIP') {
+    result.statusMsg = `${ticker.symbol} skipped`;
+    result.skipped = true;
+    result.advanced = true;
+  }
+  return result;
+}
+
+// ── localStorage stubs ──
+const _store = {};
+const _localStorage = {
+  getItem: k => _store[k] || null,
+  setItem: (k,v) => { _store[k]=v; },
+  removeItem: k => { delete _store[k]; }
+};
+</script>
+
+<script>
+// ══════════════════════════════════════════
+// EMA TESTS
+// ══════════════════════════════════════════
+section('EMA Calculation');
+
+(function() {
+  const closes = [100, 102, 104, 103, 105];
+  const ema = calcEMA(closes, 3);
+  assert(ema.length === 5, 'EMA: output length matches input');
+  assert(ema[0] === 100, 'EMA: first value equals first close');
+  assert(typeof ema[4] === 'number' && !isNaN(ema[4]), 'EMA: all values are numbers');
+  assert(Math.abs(ema[1] - 101) < 0.01, 'EMA: second value correct (k=0.5)', `Expected 101, got ${ema[1]}`);
+})();
+
+(function() {
+  const ema = calcEMA([50], 20);
+  assert(ema.length === 1, 'EMA: single value returns array of 1');
+  assert(ema[0] === 50, 'EMA: single value equals input');
+})();
+
+(function() {
+  const closes = Array(100).fill(100);
+  const ema = calcEMA(closes, 20);
+  assert(ema.every(v => Math.abs(v - 100) < 0.001), 'EMA: constant input = constant output');
+})();
+
+// ══════════════════════════════════════════
+// PARSE RESPONSE TESTS
+// ══════════════════════════════════════════
+section('parseResponse');
+
+(function() {
+  const content = '{"overlays":[],"analysis":"test","strategy_name":"EMA Cross","confidence":0.8}';
+  const {spec} = parseResponse(content, '');
+  assert(spec.analysis === 'test', 'parseResponse: clean JSON parses correctly');
+  assert(spec.strategy_name === 'EMA Cross', 'parseResponse: strategy_name extracted');
+  assert(spec.confidence === 0.8, 'parseResponse: confidence extracted');
+})();
+
+(function() {
+  const content = '```json\n{"overlays":[],"analysis":"fenced"}\n```';
+  const {spec} = parseResponse(content, '');
+  assert(spec.analysis === 'fenced', 'parseResponse: strips code fences');
+})();
+
+(function() {
+  const content = '<think>\nRSI is 65.\n</think>\n{"overlays":[],"analysis":"think_test"}';
+  const {spec, reasoning} = parseResponse(content, 'RSI is 65.');
+  assert(spec.analysis === 'think_test', 'parseResponse: extracts JSON after </think>');
+  assert(reasoning === 'RSI is 65.', 'parseResponse: reasoning passed through');
+})();
+
+(function() {
+  let threw = false;
+  try { parseResponse('no json here', ''); } catch(e) { threw = true; }
+  assert(threw, 'parseResponse: throws on no JSON');
+})();
+
+(function() {
+  let threw = false;
+  try { parseResponse('{bad json here}', ''); } catch(e) { threw = true; }
+  assert(threw, 'parseResponse: throws on malformed JSON');
+})();
+
+(function() {
+  const content = 'Here is my analysis:\n{"overlays":[],"analysis":"leading_text"}';
+  const {spec} = parseResponse(content, '');
+  assert(spec.analysis === 'leading_text', 'parseResponse: handles leading text before JSON');
+})();
+
+// ══════════════════════════════════════════
+// REPAIR JSON TESTS
+// ══════════════════════════════════════════
+section('repairJSON');
+
+(function() {
+  const bad = '{"a":1, "b":2,}';
+  const fixed = repairJSON(bad);
+  assert(JSON.parse(fixed).a === 1, 'repairJSON: strips trailing comma before }');
+})();
+
+(function() {
+  const bad = '{"val": NaN}';
+  const fixed = repairJSON(bad);
+  assert(JSON.parse(fixed).val === null, 'repairJSON: NaN → null');
+})();
+
+(function() {
+  const bad = "{'key': 'value'}";
+  const fixed = repairJSON(bad);
+  assert(JSON.parse(fixed).key === 'value', 'repairJSON: single quotes → double quotes');
+})();
+
+(function() {
+  const bad = '{"list": [1,2,3,]}';
+  const fixed = repairJSON(bad);
+  assert(JSON.parse(fixed).list.length === 3, 'repairJSON: strips trailing comma before ]');
+})();
+
+// ══════════════════════════════════════════
+// TRUNCATED JSON RECOVERY TESTS
+// ══════════════════════════════════════════
+section('tryCloseTruncated');
+
+(function() {
+  // Realistic truncation: LLM ran out of tokens after a complete key-value pair
+  const truncated = '{"overlays":[{"kind":"line","x0":"2026-01-01"}';
+  const closed = tryCloseTruncated(truncated);
+  let parsed = false;
+  try { JSON.parse(closed); parsed = true; } catch {}
+  assert(parsed, 'tryCloseTruncated: closes unclosed braces+brackets');
+})();
+
+(function() {
+  const good = '{"a":1}';
+  const result = tryCloseTruncated(good);
+  assert(JSON.parse(result).a === 1, 'tryCloseTruncated: valid JSON passes through unchanged');
+})();
+
+// ══════════════════════════════════════════
+// BUILD PROMPT TESTS
+// ══════════════════════════════════════════
+section('buildPrompt');
+
+(function() {
+  const data = [{date:'2026-01-01',open:100,high:105,low:95,close:102,volume:1000}];
+  const p = buildPrompt('AAPL', data, 1, [], TIMEFRAMES.short);
+  assert(p.includes('AAPL'), 'buildPrompt: contains symbol');
+  assert(!p.includes('PREVIOUS ITERATIONS'), 'buildPrompt: iter 1 has no history');
+  assert(p.includes('100'), 'buildPrompt: contains price data');
+  assert(p.includes('SHORT-TERM'), 'buildPrompt: includes timeframe label');
+})();
+
+(function() {
+  const data = [{date:'2026-01-01',open:100,high:105,low:95,close:102,volume:1000}];
+  const prev = [{iteration:1, strategy_name:'Fib Retrace', confidence:0.7, analysis:'test', overlays:[]}];
+  const p = buildPrompt('NVDA', data, 2, prev, TIMEFRAMES.short);
+  assert(p.includes('PREVIOUS ITERATIONS'), 'buildPrompt: iter 2 includes history');
+  assert(p.includes('Fib Retrace'), 'buildPrompt: history contains prev strategy');
+  assert(p.includes('IMPROVE'), 'buildPrompt: tells LLM to improve');
+  assert(p.includes('DIFFERENT'), 'buildPrompt: tells LLM to try different approach');
+})();
+
+(function() {
+  const data = [{date:'2026-01-01',open:100,high:105,low:95,close:102,volume:1000}];
+  const prev = [
+    {iteration:1, strategy_name:'Fib', confidence:0.5, analysis:'a', overlays:[]},
+    {iteration:2, strategy_name:'VWAP', confidence:0.6, analysis:'b', overlays:[]},
+  ];
+  const p = buildPrompt('SPY', data, 3, prev, TIMEFRAMES.short);
+  assert(p.includes('Fib'), 'buildPrompt: iter 3 sees iter 1 strategy');
+  assert(p.includes('VWAP'), 'buildPrompt: iter 3 sees iter 2 strategy');
+})();
+
+(function() {
+  const data = Array(100).fill({date:'2026-01-01',open:100,high:105,low:95,close:102,volume:1000});
+  const p = buildPrompt('AAPL', data, 1, [], TIMEFRAMES.long);
+  assert(p.includes('LONG-TERM'), 'buildPrompt: uses long-term label');
+  // Long uses 60 candles max
+  const lineCount = (p.match(/2026-01-01/g) || []).length;
+  assert(lineCount === 60, 'buildPrompt: long timeframe uses 60 candles', `Got ${lineCount}`);
+})();
+
+// ══════════════════════════════════════════
+// MODEL REGISTRY TESTS
+// ══════════════════════════════════════════
+section('Model Registry');
+
+(function() {
+  assert(MODELS.length >= 2, 'Models: at least 2 models available');
+  assert(MODELS[0].endpoint.includes('10.0.0.141'), 'Models: first model is 141');
+  assert(MODELS[1].endpoint.includes('10.0.0.30'), 'Models: second model is 30');
+})();
+
+(function() {
+  activeModelIdx = 0;
+  assert(getVLLM().includes('141'), 'getVLLM: returns 141 endpoint when idx=0');
+  assert(getMODEL() === 'Qwen/Qwen3.5-122B-A10B-FP8', 'getMODEL: returns Qwen model when idx=0');
+  activeModelIdx = 1;
+  assert(getVLLM().includes('10.0.0.30'), 'getVLLM: returns 30 endpoint when idx=1');
+  activeModelIdx = 0; // reset
+})();
+
+// ══════════════════════════════════════════
+// handleAction TESTS (Approve/Reject/Skip)
+// ══════════════════════════════════════════
+section('handleAction (Approve / Reject / Skip)');
+
+(function() {
+  const ticker = {symbol:'AAPL', status:'success', approved:false};
+  const tfd = {analysis:'Bullish crossover', approved:false, rejected:false};
+  const r = simulateHandleAction('APPROVE', ticker, tfd);
+  assert(r.approved === true, 'APPROVE: returns approved=true');
+  assert(ticker.approved === true, 'APPROVE: sets ticker.approved=true');
+  assert(tfd.approved === true, 'APPROVE: sets tfd.approved=true');
+  assert(tfd.rejected === false, 'APPROVE: clears tfd.rejected');
+  assert(r.statusMsg.includes('APPROVED'), 'APPROVE: status message contains APPROVED');
+  assert(r.analysisMsg.includes('Bullish crossover'), 'APPROVE: analysis message includes original analysis');
+  assert(r.advanced === true, 'APPROVE: auto-advances to next ticker');
+})();
+
+(function() {
+  const ticker = {symbol:'MSFT', status:'success', approved:false};
+  const tfd = {analysis:'Bearish signal', approved:false, rejected:false};
+  const r = simulateHandleAction('REJECT', ticker, tfd);
+  assert(r.rejected === true, 'REJECT: returns rejected=true');
+  assert(tfd.rejected === true, 'REJECT: sets tfd.rejected=true');
+  assert(tfd.approved === false, 'REJECT: clears tfd.approved');
+  assert(r.reIterated === true, 'REJECT: triggers re-iteration');
+  assert(r.statusMsg.includes('REJECTED'), 'REJECT: status message contains REJECTED');
+  assert(r.advanced === false, 'REJECT: does NOT auto-advance (waits for re-iteration)');
+})();
+
+(function() {
+  const ticker = {symbol:'GOOG', status:'success', approved:false};
+  const r = simulateHandleAction('SKIP', ticker, null);
+  assert(r.skipped === true, 'SKIP: returns skipped=true');
+  assert(r.advanced === true, 'SKIP: auto-advances to next ticker');
+  assert(r.statusMsg.includes('skipped'), 'SKIP: status message contains skipped');
+})();
+
+(function() {
+  // Approve then reject should flip state
+  const ticker = {symbol:'NVDA', status:'success', approved:false};
+  const tfd = {analysis:'test', approved:false, rejected:false};
+  simulateHandleAction('APPROVE', ticker, tfd);
+  assert(tfd.approved === true, 'State flip: approved first');
+  simulateHandleAction('REJECT', ticker, tfd);
+  assert(tfd.approved === false, 'State flip: reject clears approved');
+  assert(tfd.rejected === true, 'State flip: reject sets rejected');
+})();
+
+// ══════════════════════════════════════════
+// LOCALSTORAGE TESTS
+// ══════════════════════════════════════════
+section('localStorage');
+
+(function() {
+  const testData = [{date:'2026-01-01',open:100,high:105,low:95,close:102,volume:1000}];
+  _localStorage.setItem('aql_data_TEST', JSON.stringify(testData));
+  const restored = JSON.parse(_localStorage.getItem('aql_data_TEST'));
+  assert(restored.length === 1, 'localStorage: data round-trip preserves length');
+  assert(restored[0].close === 102, 'localStorage: data round-trip preserves values');
+  _localStorage.removeItem('aql_data_TEST');
+  assert(_localStorage.getItem('aql_data_TEST') === null, 'localStorage: removeItem works');
+})();
+
+(function() {
+  const meta = [{symbol:'AAPL',status:'success',error:'',tf:{short:{status:'success',analysis:'bullish',reasoning:'RSI high',strategy_name:'EMA Cross',confidence:0.8,iterations:2,spec:{overlays:[]},prevSpecs:[],approved:true}}}];
+  _localStorage.setItem('aql_tickers', JSON.stringify(meta));
+  const restored = JSON.parse(_localStorage.getItem('aql_tickers'));
+  assert(restored[0].symbol === 'AAPL', 'localStorage: meta round-trip symbol');
+  assert(restored[0].tf.short.analysis === 'bullish', 'localStorage: meta round-trip analysis');
+  assert(restored[0].tf.short.approved === true, 'localStorage: meta round-trip approved state');
+})();
+
+(function() {
+  _localStorage.setItem('aql_model_idx', '1');
+  assert(_localStorage.getItem('aql_model_idx') === '1', 'localStorage: model index persists');
+  _localStorage.setItem('aql_model_idx', '0');
+})();
+
+summary();
+</script>
+</body></html>

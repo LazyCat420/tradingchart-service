@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agentic Quant Lab</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+
+<div class="app">
+  <div class="top">
+    <div class="logo">◈ Agentic Quant Lab</div><div class="sep"></div>
+    <div class="m" id="model-name"><b>Qwen3.5-122B (141)</b></div><div class="sep"></div>
+    <div class="m" id="endpoint-name"><b>http://10.0.0.141:8000</b></div><div class="sep"></div>
+    <div class="m" id="clock"><b>--:--:--</b></div>
+    <div class="model-selector">
+      <button class="model-toggle" id="model-toggle" onclick="document.getElementById('model-dropdown').classList.toggle('open')">Switch Model</button>
+      <div class="model-dropdown" id="model-dropdown">
+        <div class="model-opt active" onclick="switchModel(0); document.getElementById('model-dropdown').classList.remove('open')">Qwen3.5-122B (141)</div>
+        <div class="model-opt" onclick="switchModel(1); document.getElementById('model-dropdown').classList.remove('open')">Qwen3.5-35B (30)</div>
+      </div>
+    </div>
+    <div class="spinner" id="spinner"></div>
+    <div class="pills">
+      <div class="pill g" id="pill-pass">0 PASS</div>
+      <div class="pill r" id="pill-fail">0 FAIL</div>
+      <div class="pill b" id="pill-rate">0%</div>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="side">
+      <div class="side-head">
+        <h2>Add Tickers</h2>
+        <div class="input-row">
+          <input id="ticker-input" placeholder="AAPL, TSLA, NVDA..." />
+          <button class="run-btn" id="run-btn" onclick="runAnalysis()">▶ RUN</button>
+        </div>
+        <div class="iter-row">
+          <label>Iterations:</label>
+          <select id="iter-select"><option value="1">1 (single pass)</option><option value="2">2 (refine)</option><option value="3" selected>3 (deep)</option></select>
+        </div>
+      </div>
+      <div class="tklist" id="ticker-list"></div>
+    </div>
+    <div class="center">
+      <div class="chart-bar">
+        <span class="active-sym" id="bar-sym">—</span>
+        <span class="strat" id="bar-strat"></span>
+        <span class="conf" id="bar-conf"></span>
+        <div class="tf-tabs">
+          <button class="tf-tab active" data-tf="short" onclick="switchTimeframe('short')">3M Daily</button>
+          <button class="tf-tab" data-tf="medium" onclick="switchTimeframe('medium')">1Y Weekly</button>
+          <button class="tf-tab" data-tf="long" onclick="switchTimeframe('long')">5Y Monthly</button>
+        </div>
+      </div>
+      <div id="chart-container"><div id="plotly-chart"></div></div>
+    </div>
+  </div>
+
+  <div class="bottom">
+    <div class="pan">
+      <div class="pan-h">
+        <h3>LLM Analysis</h3>
+        <div class="tag" style="background:rgba(88,166,255,.12);color:var(--cy)" id="ov-tag">—</div>
+      </div>
+      <div class="pan-b summ" id="analysis-text">Submit tickers above to begin analysis.</div>
+    </div>
+    <div class="pan">
+      <div class="pan-h">
+        <h3>Agent Tool Log</h3>
+        <div class="tag" style="background:rgba(188,140,255,.12);color:var(--pu)" id="tool-count-tag">0 CALLS</div>
+      </div>
+      <div class="pan-b mono" id="agent-log">
+        <div class="tool-empty">⚡ Tools: Wikipedia · ArXiv · RSI · Z-Score · Bollinger · ATR · Fibonacci · Memory</div>
+      </div>
+    </div>
+    <div class="act">
+      <div class="lb">Agent Decision</div>
+      <div class="strat-nav">
+        <button class="nav-btn" onclick="prevStrategy()">◀</button>
+        <span class="strat-counter" id="strat-counter">—</span>
+        <button class="nav-btn" onclick="nextStrategy()">▶</button>
+      </div>
+      <button class="ab re" onclick="generateMore()">↻ Generate More</button>
+      <button class="ab sc" onclick="scoreStrategies()">★ Score Strategies</button>
+      <button class="ab rj" style="background:transparent;border:1px solid rgba(248,113,113,.4);color:var(--rd);margin-top:auto" onclick="clearAll()">🗑 Clear All</button>
+    </div>
+  </div>
+
+  <div class="stat">
+    <span class="live">● ONLINE</span>
+    <span>CONCURRENCY: 5</span>
+    <span>OVERLAYS: line · zone · void</span>
+    <span id="status-msg"></span>
+  </div>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
