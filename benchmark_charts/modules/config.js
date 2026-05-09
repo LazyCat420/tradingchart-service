@@ -6,18 +6,22 @@
 // ── Model Registry ──
 export const MODELS = [
   {
-    id: 'qwen-122b-141',
-    name: 'Qwen3.5-122B (141)',
+    id: '141',
+    name: 'No Model (141)',
     endpoint: 'http://10.0.0.141:8000/v1/chat/completions',
-    model: 'Qwen/Qwen3.5-122B-A10B-FP8',
+    model: '',
+    ready: false,
   },
   {
-    id: 'model-30',
-    name: 'Qwen3.5-35B (30)',
+    id: '30',
+    name: 'No Model (30)',
     endpoint: 'http://10.0.0.30:8000/v1/chat/completions',
-    model: 'Kbenkhaled/Qwen3.5-35B-A3B-quantized.w4a16',
+    model: '',
+    ready: false,
   },
 ];
+
+export const MODEL_PROBE_INTERVAL_MS = 10_000;
 
 export const CORS_PROXY = 'https://corsproxy.io/?url=';
 

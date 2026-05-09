@@ -15,14 +15,14 @@
 <div class="app">
   <div class="top">
     <div class="logo">◈ Agentic Quant Lab</div><div class="sep"></div>
-    <div class="m" id="model-name"><b>Qwen3.5-122B (141)</b></div><div class="sep"></div>
+    <div class="m" id="model-name"><b>🔴 No Model (141)</b></div><div class="sep"></div>
     <div class="m" id="endpoint-name"><b>http://10.0.0.141:8000</b></div><div class="sep"></div>
     <div class="m" id="clock"><b>--:--:--</b></div>
     <div class="model-selector">
       <button class="model-toggle" id="model-toggle" onclick="document.getElementById('model-dropdown').classList.toggle('open')">Switch Model</button>
       <div class="model-dropdown" id="model-dropdown">
-        <div class="model-opt active" onclick="switchModel(0); document.getElementById('model-dropdown').classList.remove('open')">Qwen3.5-122B (141)</div>
-        <div class="model-opt" onclick="switchModel(1); document.getElementById('model-dropdown').classList.remove('open')">Qwen3.5-35B (30)</div>
+        <div class="model-opt active" onclick="switchModel(0); document.getElementById('model-dropdown').classList.remove('open')">🔴 No Model (141)</div>
+        <div class="model-opt" onclick="switchModel(1); document.getElementById('model-dropdown').classList.remove('open')">🔴 No Model (30)</div>
       </div>
     </div>
     <div class="spinner" id="spinner"></div>
@@ -41,9 +41,11 @@
           <input id="ticker-input" placeholder="AAPL, TSLA, NVDA..." />
           <button class="run-btn" id="run-btn" onclick="runAnalysis()">▶ RUN</button>
         </div>
-        <div class="iter-row">
-          <label>Iterations:</label>
-          <select id="iter-select"><option value="1">1 (single pass)</option><option value="2">2 (refine)</option><option value="3" selected>3 (deep)</option></select>
+        <div class="iter-row" style="display: flex; gap: 8px; font-size: 11px; align-items: center; margin-top: 8px;">
+          <label>Iters:</label>
+          <div title="Daily"><span style="color:#a78bfa">D</span> <input id="iter-short" type="number" min="0" max="5" value="3" style="width: 32px; background: rgba(0,0,0,0.3); border: 1px solid #334155; color: #fff; padding: 2px; border-radius: 3px; text-align: center;"></div>
+          <div title="Weekly"><span style="color:#a78bfa">W</span> <input id="iter-medium" type="number" min="0" max="5" value="1" style="width: 32px; background: rgba(0,0,0,0.3); border: 1px solid #334155; color: #fff; padding: 2px; border-radius: 3px; text-align: center;"></div>
+          <div title="Monthly"><span style="color:#a78bfa">M</span> <input id="iter-long" type="number" min="0" max="5" value="1" style="width: 32px; background: rgba(0,0,0,0.3); border: 1px solid #334155; color: #fff; padding: 2px; border-radius: 3px; text-align: center;"></div>
         </div>
       </div>
       <div class="tklist" id="ticker-list"></div>

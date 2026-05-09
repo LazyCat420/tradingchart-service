@@ -120,8 +120,8 @@ function buildPrompt(symbol, data, iter, prev, tfConfig) {
 
 // ── Model Registry (mirror of app.js) ──
 const MODELS = [
-  { id:'qwen-122b-141', name:'Qwen3.5-122B (141)', endpoint:'http://10.0.0.141:8000/v1/chat/completions', model:'Qwen/Qwen3.5-122B-A10B-FP8' },
-  { id:'model-30',      name:'Qwen3.5-35B (30)',         endpoint:'http://10.0.0.30:8000/v1/chat/completions',  model:'Kbenkhaled/Qwen3.5-35B-A3B-quantized.w4a16' },
+  { id:'141', name:'No Model (141)', endpoint:'http://10.0.0.141:8000/v1/chat/completions', model:'', ready: false },
+  { id:'30',  name:'No Model (30)',  endpoint:'http://10.0.0.30:8000/v1/chat/completions',  model:'', ready: false },
 ];
 let activeModelIdx = 0;
 function getVLLM() { return MODELS[activeModelIdx].endpoint; }
@@ -337,7 +337,8 @@ section('Model Registry');
 (function() {
   activeModelIdx = 0;
   assert(getVLLM().includes('141'), 'getVLLM: returns 141 endpoint when idx=0');
-  assert(getMODEL() === 'Qwen/Qwen3.5-122B-A10B-FP8', 'getMODEL: returns Qwen model when idx=0');
+  assert(getMODEL() === '', 'getMODEL: returns empty string when model not loaded');
+  assert(MODELS[0].ready === false, 'Models: idx 0 starts as not ready');
   activeModelIdx = 1;
   assert(getVLLM().includes('10.0.0.30'), 'getVLLM: returns 30 endpoint when idx=1');
   activeModelIdx = 0; // reset

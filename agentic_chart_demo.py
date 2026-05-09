@@ -6,9 +6,24 @@ import plotly.graph_objects as go
 import aiohttp
 import asyncio
 
+import urllib.request
+
 # The vLLM text endpoint
 VLLM_ENDPOINT = "http://10.0.0.141:8000/v1/chat/completions"
-MODEL_NAME = "Qwen/Qwen3.5-122B-A10B-FP8"
+
+def get_model_name(endpoint):
+    base = endpoint.replace("/chat/completions", "")
+    try:
+        req = urllib.request.Request(f"{base}/models")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            if data and "data" in data and len(data["data"]) > 0:
+                return data["data"][0]["id"]
+    except Exception as e:
+        print(f"Warning: Failed to fetch dynamic model from {base}: {e}")
+    return "Qwen/Qwen3.5-122B-A10B-FP8" # Fallback
+
+MODEL_NAME = get_model_name(VLLM_ENDPOINT)
 
 def fetch_data(symbol="TSLA", period="3mo"):
     print(f"Fetching {period} of data for {symbol}...")

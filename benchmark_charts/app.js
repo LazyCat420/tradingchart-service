@@ -3,7 +3,7 @@
  * No logic, no state management, no rendering.
  * Imports modular pieces and connects them to the DOM.
  */
-import { TF_ORDER } from './modules/config.js';
+import { TF_ORDER, MODELS, MODEL_PROBE_INTERVAL_MS } from './modules/config.js';
 import { state, loadState, clearAllState, deleteTickerState } from './modules/state.js';
 import { initBackground } from './modules/background.js';
 import {
@@ -80,6 +80,93 @@ setInterval(() => {
   if (e) e.innerHTML = '<b>' + new Date().toLocaleTimeString() + '</b>';
 }, 1000);
 
+// ── Model Health Probing ──
+
+/**
+ * Probe a single model entry. 2-step check:
+ *   1. GET /health — is vLLM ready to serve?
+ *   2. GET /v1/models — what model is loaded?
+ * Mutates the model entry in-place (name, model, ready).
+ */
+async function probeModel(m) {
+  const baseUrl = m.endpoint.replace('/chat/completions', '');
+  const ip = m.id; // '141' or '30'
+
+  // Step 1: Health check
+  let healthy = false;
+  try {
+    const healthRes = await fetch(baseUrl.replace('/v1', '') + '/health', {
+      signal: AbortSignal.timeout(5000),
+    });
+    healthy = healthRes.ok; // 200 = ready, 503 = loading
+  } catch {
+    // Server completely unreachable
+    m.name = `Offline (${ip})`;
+    m.model = '';
+    m.ready = false;
+    console.log(`[PROBE] ${ip}: offline`);
+    return;
+  }
+
+  if (!healthy) {
+    m.name = `Loading... (${ip})`;
+    m.model = '';
+    m.ready = false;
+    console.log(`[PROBE] ${ip}: server up but model loading`);
+    return;
+  }
+
+  // Step 2: Fetch model name (only if healthy)
+  try {
+    const modelsRes = await fetch(baseUrl + '/models', {
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await modelsRes.json();
+    if (data && data.data && data.data.length > 0) {
+      m.model = data.data[0].id;
+      const shortName = m.model.split('/').pop()
+        .replace('.w4a16', '')
+        .replace('-FP8', '')
+        .replace('quantized.', '');
+      m.name = `${shortName} (${ip})`;
+      m.ready = true;
+      console.log(`[PROBE] ${ip}: ready — ${m.model}`);
+    } else {
+      m.name = `No Model (${ip})`;
+      m.model = '';
+      m.ready = false;
+      console.log(`[PROBE] ${ip}: healthy but no models listed`);
+    }
+  } catch (e) {
+    m.name = `Error (${ip})`;
+    m.model = '';
+    m.ready = false;
+    console.warn(`[PROBE] ${ip}: models fetch failed`, e);
+  }
+}
+
+/**
+ * Probe all models and update the UI.
+ */
+async function probeAllModels() {
+  await Promise.all(MODELS.map(probeModel));
+  updateModelDropdown();
+  switchModel(state.activeModelIdx);
+}
+
+/**
+ * Rebuild the dropdown menu items to reflect current model names + readiness.
+ */
+function updateModelDropdown() {
+  const dropdown = document.getElementById('model-dropdown');
+  if (!dropdown) return;
+  dropdown.innerHTML = MODELS.map((m, i) => {
+    const cls = i === state.activeModelIdx ? 'model-opt active' : 'model-opt';
+    const readyDot = m.ready ? '🟢' : '🔴';
+    return `<div class="${cls}" onclick="switchModel(${i}); document.getElementById('model-dropdown').classList.remove('open')">${readyDot} ${m.name}</div>`;
+  }).join('');
+}
+
 // ── Bootstrap ──
 document.addEventListener('DOMContentLoaded', () => {
   initBackground();
@@ -101,8 +188,12 @@ document.addEventListener('DOMContentLoaded', () => {
     selectItem(Math.min(savedIdx, state.tickers.length - 1));
   }
 
-  // Init model selector display
+  // Initial probe + render with whatever we know
   switchModel(state.activeModelIdx);
+  probeAllModels();
+
+  // Poll every 10s to keep model status accurate
+  setInterval(probeAllModels, MODEL_PROBE_INTERVAL_MS);
 
   console.log('[APP] Agentic Quant Lab initialized — modular architecture');
 });

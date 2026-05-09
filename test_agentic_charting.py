@@ -26,7 +26,7 @@ def test_render_chart_with_geometric_line(mock_df, tmp_path):
     import agentic_chart_benchmark
     old = agentic_chart_benchmark.OUTPUT_DIR
     agentic_chart_benchmark.OUTPUT_DIR = str(tmp_path)
-    out = render_chart(mock_df, spec, "TEST_GEO")
+    out = render_chart(mock_df, spec, "TEST_GEO", "Test Timeframe")
     assert os.path.exists(out)
     html = open(out, encoding='utf-8').read()
     assert '"type":"line"' in html
@@ -42,7 +42,7 @@ def test_render_chart_with_liquidity_void(mock_df, tmp_path):
     import agentic_chart_benchmark
     old = agentic_chart_benchmark.OUTPUT_DIR
     agentic_chart_benchmark.OUTPUT_DIR = str(tmp_path)
-    out = render_chart(mock_df, spec, "TEST_VOID")
+    out = render_chart(mock_df, spec, "TEST_VOID", "Test Timeframe")
     html = open(out, encoding='utf-8').read()
     assert '"type":"rect"' in html
     assert '"fillcolor":"purple"' in html
@@ -59,7 +59,7 @@ def test_render_chart_with_zone_overlay(mock_df, tmp_path):
     import agentic_chart_benchmark
     old = agentic_chart_benchmark.OUTPUT_DIR
     agentic_chart_benchmark.OUTPUT_DIR = str(tmp_path)
-    out = render_chart(mock_df, spec, "TEST_ZONE")
+    out = render_chart(mock_df, spec, "TEST_ZONE", "Test Timeframe")
     html = open(out, encoding='utf-8').read()
     assert '"type":"rect"' in html
     assert '"fillcolor":"blue"' in html
@@ -72,7 +72,7 @@ def test_render_chart_empty_overlays(mock_df, tmp_path):
     import agentic_chart_benchmark
     old = agentic_chart_benchmark.OUTPUT_DIR
     agentic_chart_benchmark.OUTPUT_DIR = str(tmp_path)
-    out = render_chart(mock_df, spec, "TEST_EMPTY")
+    out = render_chart(mock_df, spec, "TEST_EMPTY", "Test Timeframe")
     assert os.path.exists(out)
     assert os.path.getsize(out) > 1000  # Valid HTML is > 1KB
     agentic_chart_benchmark.OUTPUT_DIR = old
@@ -117,7 +117,7 @@ class MockSession:
 async def test_parse_think_tags(mock_df):
     """Reasoning is extracted from <think> tags and excluded from JSON."""
     payload = {"choices":[{"message":{"content":"<think>\nRSI is at 65.\n</think>\n{\"overlays\":[],\"analysis\":\"test\"}"}}]}
-    spec, reasoning = await ask_llm_for_overlays(MockSession(payload), mock_df, "T")
+    spec, reasoning = await ask_llm_for_overlays(MockSession(payload), mock_df, "T", {"tail": 10, "prompt_label": "Test"})
     assert spec["analysis"] == "test"
     assert "RSI is at 65" in reasoning
     assert "<think>" not in reasoning
@@ -126,7 +126,7 @@ async def test_parse_think_tags(mock_df):
 async def test_parse_reasoning_field(mock_df):
     """reasoning_content field takes priority over <think> tags."""
     payload = {"choices":[{"message":{"reasoning_content":"Field reasoning.","content":"{\"overlays\":[],\"analysis\":\"test2\"}"}}]}
-    spec, reasoning = await ask_llm_for_overlays(MockSession(payload), mock_df, "T")
+    spec, reasoning = await ask_llm_for_overlays(MockSession(payload), mock_df, "T", {"tail": 10, "prompt_label": "Test"})
     assert spec["analysis"] == "test2"
     assert reasoning == "Field reasoning."
 
@@ -134,7 +134,7 @@ async def test_parse_reasoning_field(mock_df):
 async def test_parse_code_fenced_json(mock_df):
     """JSON wrapped in ```json fences is still parsed correctly."""
     payload = {"choices":[{"message":{"content":"```json\n{\"overlays\":[],\"analysis\":\"fenced\"}\n```"}}]}
-    spec, _ = await ask_llm_for_overlays(MockSession(payload), mock_df, "T")
+    spec, _ = await ask_llm_for_overlays(MockSession(payload), mock_df, "T", {"tail": 10, "prompt_label": "Test"})
     assert spec["analysis"] == "fenced"
 
 # ── Iterative Prompt Tests ──

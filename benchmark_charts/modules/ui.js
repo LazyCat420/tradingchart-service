@@ -275,10 +275,12 @@ export function nextStrategy() {
 export function switchModel(idx) {
   state.activeModelIdx = idx;
   localStorage.setItem('aql_model_idx', String(idx));
+  const m = MODELS[idx];
   const mEl = $('model-name');
   const eEl = $('endpoint-name');
-  mEl.innerHTML = '<b>' + MODELS[idx].name + '</b>';
-  eEl.innerHTML = '<b>' + MODELS[idx].endpoint.replace('/v1/chat/completions', '') + '</b>';
+  const readyDot = m.ready ? '🟢' : '🔴';
+  mEl.innerHTML = `${readyDot} <b>${m.name}</b>`;
+  eEl.innerHTML = '<b>' + m.endpoint.replace('/v1/chat/completions', '') + '</b>';
   document.querySelectorAll('.model-opt').forEach((el, i) => el.classList.toggle('active', i === idx));
-  console.log('[MODEL] Switched to', MODELS[idx].name);
+  console.log('[MODEL] Switched to', m.name, m.ready ? '(ready)' : '(not ready)');
 }

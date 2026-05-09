@@ -130,4 +130,4 @@ if __name__ == "__main__":
     print(f"  LLM relay  -> {VLLM_ENDPOINT}")
     print(f"  Static dir -> {os.path.abspath(STATIC_DIR)}")
     print(f"{'='*50}")
-    http.server.HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

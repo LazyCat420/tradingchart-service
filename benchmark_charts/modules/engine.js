@@ -176,6 +176,19 @@ function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning) {
 async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
   const tfConfig = TIMEFRAMES[tfKey];
   const tfd = t.tf[tfKey];
+  
+  if (iters <= 0) {
+    tfd.status = 'skipped';
+    tfd.analysis = 'Skipped by user config (0 iterations).';
+    if (isCurrentView(tickerIdx, tfKey)) {
+      $('analysis-text').textContent = tfd.analysis;
+      renderEmptyChart(t.symbol, tfConfig.label);
+      updateAgentLogPanel([]);
+      $('ov-tag').textContent = '—';
+    }
+    return null;
+  }
+
   tfd.status = 'running';
   tfd.prevSpecs = tfd.prevSpecs || [];
 
@@ -263,7 +276,7 @@ async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
 }
 
 // ── Process a full ticker (all timeframes, hierarchical) ──
-export async function processTicker(idx, iters) {
+export async function processTicker(idx, itersConfig) {
   const t = state.tickers[idx];
   t.status = 'running';
   initTickerTF(t);
@@ -277,7 +290,8 @@ export async function processTicker(idx, iters) {
     let macroContext = '';
 
     for (const tfKey of hierarchicalOrder) {
-      const result = await processTimeframe(idx, t, tfKey, iters, macroContext);
+      const itersForTF = itersConfig[tfKey] || 0;
+      const result = await processTimeframe(idx, t, tfKey, itersForTF, macroContext);
       if (result) macroContext += result;
       // BUG FIX: original used `return;` here on fetch failure, which skipped cleanup.
       // Now processTimeframe returns null on failure and we just continue.
@@ -306,7 +320,11 @@ export async function runAnalysis() {
   const raw = $('ticker-input').value;
   if (!raw.trim()) return;
   const syms = raw.split(/[,\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
-  const iters = parseInt($('iter-select').value);
+  const itersConfig = {
+    short: parseInt($('iter-short').value) || 0,
+    medium: parseInt($('iter-medium').value) || 0,
+    long: parseInt($('iter-long').value) || 0
+  };
   $('ticker-input').value = '';
 
   // Add new symbols
@@ -321,7 +339,7 @@ export async function runAnalysis() {
   // Fire ALL in parallel (non-blocking)
   const promises = syms.map(s => {
     const i = state.tickers.findIndex(t => t.symbol === s);
-    if (i !== -1) return processTicker(i, iters);
+    if (i !== -1) return processTicker(i, itersConfig);
   });
   const firstIdx = state.tickers.findIndex(t => t.symbol === syms[0]);
   if (firstIdx !== -1) selectItem(firstIdx);
