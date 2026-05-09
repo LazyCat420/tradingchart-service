@@ -17,7 +17,7 @@ import { AGENTIC_SYSTEM_PROMPT, buildPrompt } from './prompt.js';
 import { executeToolCall, parseToolCallDirective, TOOL_REGISTRY } from './tools.js';
 import { parseResponse, tryParsePartial } from './json-utils.js';
 import { addMemoryEntry } from './memory.js';
-import { renderChart } from './chart.js';
+import { renderChart, renderEmptyChart } from './chart.js';
 import {
   $, renderList, updateSpinner, updatePills, updateBottom,
   updateTfTabs, updateAgentLogPanel, updateStrategyCarousel,
@@ -172,7 +172,80 @@ function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning) {
   });
 }
 
-// ── Process one timeframe for a ticker ──
+// ── Modular Timeframe Execution Blocks ──
+
+async function ensureTimeframeData(t, tfKey, tfConfig) {
+  const tfd = t.tf[tfKey];
+  if (tfd.data) return true;
+  
+  $('status-msg').textContent = `${t.symbol} · fetching ${tfConfig.label}... (${state.runningCount} active)`;
+  try {
+    tfd.data = await fetchData(t.symbol, tfConfig.range, tfConfig.interval);
+    return true;
+  } catch (fetchErr) {
+    console.warn(`[${t.symbol}] Failed to fetch ${tfConfig.label}:`, fetchErr.message);
+    tfd.status = 'error';
+    tfd.analysis = '⚠ Data fetch failed: ' + fetchErr.message;
+    return false;
+  }
+}
+
+function activateTimeframeTab(tickerIdx, t, tfKey, tfConfig) {
+  if (state.activeIdx !== tickerIdx) return;
+  const tfd = t.tf[tfKey];
+  
+  if (!state.userLockedTF && state.activeTF !== tfKey) {
+    state.activeTF = tfKey;
+    document.querySelectorAll('.tf-tab').forEach(b => b.classList.toggle('active', b.dataset.tf === tfKey));
+  }
+  if (state.activeTF === tfKey && tfd.data) {
+    renderChart(tfd.data, { overlays: [] }, t.symbol, tfConfig.label);
+  }
+}
+
+async function executeSingleIteration(tickerIdx, t, tfKey, it, macroContext) {
+  const tfConfig = TIMEFRAMES[tfKey];
+  const tfd = t.tf[tfKey];
+  let lastErr = null;
+  let succeeded = false;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES_PER_ITER; attempt++) {
+    try {
+      const label = attempt > 0 ? ` (retry ${attempt})` : '';
+      const lensName = STRATEGY_LENSES[(it - 1) % STRATEGY_LENSES.length].name;
+      
+      if (isCurrentView(tickerIdx, tfKey)) {
+        $('status-msg').textContent = `${t.symbol} · ${tfConfig.label} · strategy ${it} (${lensName})${label} (${state.runningCount} active)`;
+      }
+      if (attempt > 0) {
+        console.log(`[${t.symbol}/${tfKey}] Retrying iter ${it}...`);
+        tfd.liveContent = `🔄 Retrying iter ${it}...`;
+        if (isCurrentView(tickerIdx, tfKey)) $('analysis-text').textContent = tfd.liveContent;
+      }
+
+      const { spec, reasoning } = await agenticLLMLoop(tickerIdx, t.symbol, tfd.data, it, tfd.prevSpecs, tfConfig, macroContext);
+      saveIterationResult(t, tfd, tfKey, it, spec, reasoning);
+
+      if (isCurrentView(tickerIdx, tfKey)) {
+        renderChart(tfd.data, spec, t.symbol, tfConfig.label);
+        updateBottom(t);
+      }
+      renderList();
+      succeeded = true;
+      break;
+    } catch (iterErr) {
+      lastErr = iterErr;
+      console.warn(`[${t.symbol}/${tfKey}] iter ${it} attempt ${attempt + 1} failed:`, iterErr.message);
+    }
+  }
+
+  if (!succeeded) {
+    console.error(`[${t.symbol}/${tfKey}] iter ${it} failed after retries.`);
+    tfd.liveContent = `⚠ iter ${it} failed: ${lastErr?.message || 'unknown'}`;
+    if (isCurrentView(tickerIdx, tfKey)) $('analysis-text').textContent = tfd.liveContent;
+  }
+}
+
 async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
   const tfConfig = TIMEFRAMES[tfKey];
   const tfd = t.tf[tfKey];
@@ -192,87 +265,40 @@ async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
   tfd.status = 'running';
   tfd.prevSpecs = tfd.prevSpecs || [];
 
-  // Fetch data only if missing
-  if (!tfd.data) {
-    $('status-msg').textContent = `${t.symbol} · fetching ${tfConfig.label}... (${state.runningCount} active)`;
-    try {
-      tfd.data = await fetchData(t.symbol, tfConfig.range, tfConfig.interval);
-    } catch (fetchErr) {
-      console.warn(`[${t.symbol}] Failed to fetch ${tfConfig.label}:`, fetchErr.message);
-      tfd.status = 'error';
-      tfd.analysis = '⚠ Data fetch failed: ' + fetchErr.message;
-      return null; // Return null = no macro context contribution
+  const hasData = await ensureTimeframeData(t, tfKey, tfConfig);
+  if (!hasData) return null;
+
+  activateTimeframeTab(tickerIdx, t, tfKey, tfConfig);
+
+  state.runningCount += iters;
+  updateSpinner();
+  
+  try {
+    const iterPromises = [];
+    for (let i = 0; i < iters; i++) {
+      const it = (tfd.prevSpecs?.length || 0) + i + 1;
+      iterPromises.push(executeSingleIteration(tickerIdx, t, tfKey, it, macroContext));
     }
+    await Promise.allSettled(iterPromises);
+
+    tfd.status = tfd.spec ? 'success' : 'error';
+    if (!tfd.spec) tfd.analysis = '⚠ All iterations failed for ' + tfConfig.label;
+
+    if (tfd.data) saveTickerData(t.symbol, tfKey, tfd.data);
+    saveState();
+    updateTfTabs(t);
+    renderList();
+
+    if (tfd.spec) {
+      const dir = tfd.spec.prediction?.direction || 'UNKNOWN';
+      const tgt = tfd.spec.prediction?.target_price || '?';
+      return `[${tfConfig.label} Bias]: ${dir} (Target: $${tgt})\nRationale: ${tfd.spec.analysis}\n\n`;
+    }
+    return null;
+  } finally {
+    state.runningCount -= iters;
+    updateSpinner();
   }
-
-  // Show chart immediately
-  if (state.activeIdx === tickerIdx) {
-    if (!state.userLockedTF && state.activeTF !== tfKey) {
-      state.activeTF = tfKey;
-      document.querySelectorAll('.tf-tab').forEach(b => b.classList.toggle('active', b.dataset.tf === tfKey));
-    }
-    if (state.activeTF === tfKey && tfd.data) {
-      renderChart(tfd.data, { overlays: [] }, t.symbol, tfConfig.label);
-    }
-  }
-
-  // Run LLM iterations
-  for (let i = 0; i < iters; i++) {
-    const it = tfd.prevSpecs.length + 1;
-    let lastErr = null;  // BUG FIX: was undeclared (implicit global)
-    let succeeded = false;
-
-    for (let attempt = 0; attempt <= MAX_RETRIES_PER_ITER; attempt++) {
-      try {
-        const label = attempt > 0 ? ` (retry ${attempt})` : '';
-        const lensName = STRATEGY_LENSES[(it - 1) % STRATEGY_LENSES.length].name;
-        if (isCurrentView(tickerIdx, tfKey)) {
-          $('status-msg').textContent = `${t.symbol} · ${tfConfig.label} · strategy ${it} (${lensName})${label} (${state.runningCount} active)`;
-        }
-        if (attempt > 0) {
-          console.log(`[${t.symbol}/${tfKey}] Retrying iter ${it}...`);
-          tfd.liveContent = `🔄 Retrying iter ${it}...`;
-          if (isCurrentView(tickerIdx, tfKey)) $('analysis-text').textContent = tfd.liveContent;
-        }
-
-        const { spec, reasoning } = await agenticLLMLoop(tickerIdx, t.symbol, tfd.data, it, tfd.prevSpecs, tfConfig, macroContext);
-        saveIterationResult(t, tfd, tfKey, it, spec, reasoning);
-
-        if (isCurrentView(tickerIdx, tfKey)) {
-          renderChart(tfd.data, spec, t.symbol, tfConfig.label);
-          updateBottom(t);
-        }
-        renderList();
-        succeeded = true;
-        break;
-      } catch (iterErr) {
-        lastErr = iterErr;
-        console.warn(`[${t.symbol}/${tfKey}] iter ${it} attempt ${attempt + 1} failed:`, iterErr.message);
-      }
-    }
-
-    if (!succeeded) {
-      console.error(`[${t.symbol}/${tfKey}] iter ${it} failed after retries.`);
-      tfd.liveContent = `⚠ iter ${it} failed: ${lastErr?.message || 'unknown'}`;
-      if (isCurrentView(tickerIdx, tfKey)) $('analysis-text').textContent = tfd.liveContent;
-    }
-  }
-
-  tfd.status = tfd.spec ? 'success' : 'error';
-  if (!tfd.spec) tfd.analysis = '⚠ All iterations failed for ' + tfConfig.label;
-
-  if (tfd.data) saveTickerData(t.symbol, tfKey, tfd.data);
-  saveState();
-  updateTfTabs(t);
-  renderList();
-
-  // Return macro context for next smaller timeframe
-  if (tfd.spec) {
-    const dir = tfd.spec.prediction?.direction || 'UNKNOWN';
-    const target = tfd.spec.prediction?.target_price || '?';
-    return `[${tfConfig.label} Bias]: ${dir} (Target: $${target})\nRationale: ${tfd.spec.analysis}\n\n`;
-  }
-  return null;
 }
 
 // ── Process a full ticker (all timeframes, hierarchical) ──
@@ -280,22 +306,16 @@ export async function processTicker(idx, itersConfig) {
   const t = state.tickers[idx];
   t.status = 'running';
   initTickerTF(t);
-  state.runningCount++;
-  updateSpinner();
   renderList();
 
   try {
-    // Process timeframes hierarchically: Macro → Micro
-    const hierarchicalOrder = [...TF_ORDER].reverse(); // ['long', 'medium', 'short']
-    let macroContext = '';
-
-    for (const tfKey of hierarchicalOrder) {
+    // Process timeframes in parallel for maximum speed
+    const tfPromises = TF_ORDER.map(tfKey => {
       const itersForTF = itersConfig[tfKey] || 0;
-      const result = await processTimeframe(idx, t, tfKey, itersForTF, macroContext);
-      if (result) macroContext += result;
-      // BUG FIX: original used `return;` here on fetch failure, which skipped cleanup.
-      // Now processTimeframe returns null on failure and we just continue.
-    }
+      return processTimeframe(idx, t, tfKey, itersForTF, '');
+    });
+
+    await Promise.allSettled(tfPromises);
 
     const anySuccess = TF_ORDER.some(tf => t.tf[tf].status === 'success');
     t.status = anySuccess ? 'success' : 'error';
@@ -305,9 +325,7 @@ export async function processTicker(idx, itersConfig) {
     t.error = e.message;
     console.error(`[${t.symbol}]`, e);
   } finally {
-    // BUG FIX: guaranteed cleanup — original had no finally block,
-    // so any unhandled throw would permanently corrupt runningCount.
-    state.runningCount--;
+    // BUG FIX: guaranteed cleanup
     updateSpinner();
     renderList();
     updatePills();
@@ -348,74 +366,65 @@ export async function runAnalysis() {
   $('status-msg').textContent = `Batch done — ${syms.length} tickers × 3 timeframes.`;
 }
 
-// ── Generate More (add one more strategy per timeframe) ──
-export async function generateMore() {
+// ── Generate Specific (add configured iterations per timeframe) ──
+export async function generateSpecific(tfKey) {
   if (state.activeIdx < 0) return;
   const t = state.tickers[state.activeIdx];
-  const tfKey = state.activeTF; // ONLY generate for the currently viewed timeframe
   const tfConfig = TIMEFRAMES[tfKey];
   const tfd = t.tf[tfKey];
 
   if (tfd.status === 'running') {
-    $('status-msg').textContent = '⚠ Already generating for ' + tfConfig.label;
+    if (isCurrentView(state.activeIdx, tfKey)) {
+      $('status-msg').textContent = '⚠ Already generating for ' + tfConfig.label;
+    }
     return;
   }
 
+  const uiValue = parseInt($('iter-' + tfKey)?.value) || 0;
+  const itersToRun = uiValue > 0 ? uiValue : 1; // Default to at least 1 if manually clicked
+
   t.status = 'running';
   tfd.status = 'running';
-  state.runningCount++;
+  state.runningCount += itersToRun; // Increment by exact parallel requests for UI transparency
   updateSpinner();
   renderList();
 
   try {
-    // Fetch data if missing
-    if (!tfd.data) {
-      $('status-msg').textContent = `${t.symbol} · ${tfConfig.label} · fetching data...`;
-      try {
-        tfd.data = await fetchData(t.symbol, tfConfig.range, tfConfig.interval);
-        saveTickerData(t.symbol, tfKey, tfd.data);
-      } catch (fetchErr) {
-        console.error(`[generateMore] Fetch failed for ${t.symbol}/${tfKey}:`, fetchErr);
-        tfd.status = 'error';
-        tfd.analysis = '⚠ Data fetch failed — ' + fetchErr.message;
-        return;
-      }
+    const hasData = await ensureTimeframeData(t, tfKey, tfConfig);
+    if (!hasData) return;
+    
+    saveTickerData(t.symbol, tfKey, tfd.data);
+
+    const iterPromises = [];
+    for (let i = 0; i < itersToRun; i++) {
+      const it = (tfd.prevSpecs?.length || 0) + i + 1;
+      iterPromises.push(executeSingleIteration(state.activeIdx, t, tfKey, it, ''));
     }
-
-    const it = (tfd.prevSpecs?.length || 0) + 1;
-    const lens = STRATEGY_LENSES[(it - 1) % STRATEGY_LENSES.length];
-
-    $('status-msg').textContent = `${t.symbol} · ${tfConfig.label} · generating ${lens.name} strategy...`;
-    $('analysis-text').textContent = `🔄 Generating strategy #${it} (${lens.name} lens)...`;
-
-    try {
-      const macroContext = ''; // We skip macro context injection for single on-demand generation to keep it fast
-      const { spec, reasoning } = await agenticLLMLoop(state.activeIdx, t.symbol, tfd.data, it, tfd.prevSpecs || [], tfConfig, macroContext);
-      saveIterationResult(t, tfd, tfKey, it, spec, reasoning);
-      tfd.status = 'success';
-
-      state.activeStratIdx = tfd.prevSpecs.length - 1;
-      renderChart(tfd.data, spec, t.symbol, tfConfig.label);
-      updateBottom(t);
-      updateStrategyCarousel(t, tfKey);
-      $('status-msg').textContent = `${t.symbol} · ${tfConfig.label} · strategy #${it} complete (${lens.name})`;
-    } catch (e) {
-      tfd.status = 'error';
-      tfd.analysis = '⚠ ' + e.message;
-      updateBottom(t);
-      $('status-msg').textContent = `⚠ ${t.symbol} ${tfConfig.label} generation failed: ${e.message}`;
-    }
+    await Promise.allSettled(iterPromises);
 
     const anySuccess = TF_ORDER.some(tf => t.tf[tf].status === 'success');
     t.status = anySuccess ? 'success' : 'error';
+    tfd.status = tfd.spec ? 'success' : 'error';
+    
+    if (isCurrentView(state.activeIdx, tfKey)) {
+       state.activeStratIdx = Math.max(0, (tfd.prevSpecs?.length || 1) - 1);
+       updateStrategyCarousel(t, tfKey);
+    }
   } finally {
-    state.runningCount--;
+    state.runningCount -= itersToRun;
     updateSpinner();
     renderList();
     updatePills();
     updateTfTabs(t);
     saveState();
   }
+}
+
+// ── Generate All ──
+export async function generateAll() {
+  if (state.activeIdx < 0) return;
+  const promises = TF_ORDER.map(tfKey => generateSpecific(tfKey));
+  await Promise.allSettled(promises);
 }
 
 // ── Forward-Testing Scoring ──

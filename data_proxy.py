@@ -18,7 +18,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, x-vllm-endpoint")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         super().end_headers()
 
@@ -55,6 +55,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             if p.path == "/":
                 self.path = "/index.html"
+            elif p.path == "/api/llm/models":
+                target = self.headers.get("x-vllm-endpoint", VLLM_ENDPOINT)
+                base = target.replace("/chat/completions", "")
+                req = urllib.request.Request(f"{base}/models")
+                print(f"[DEBUG proxy] target: {target}, base: {base}, req: {req.full_url}")
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        self._raw(resp.read())
+                except Exception as e:
+                    self._json({"error": str(e)}, 502)
+                return
+            elif p.path == "/api/llm/health":
+                target = self.headers.get("x-vllm-endpoint", VLLM_ENDPOINT)
+                base = target.replace("/v1/chat/completions", "")
+                req = urllib.request.Request(f"{base}/health")
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        self._raw(resp.read(), resp.status)
+                except urllib.error.HTTPError as e:
+                    self._raw(e.read() if hasattr(e, 'read') else b'', e.code)
+                except Exception as e:
+                    self._json({"error": str(e)}, 502)
+                return
             super().do_GET()
 
     def do_POST(self):
@@ -105,16 +128,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def _json(self, obj, code=200):
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(obj).encode())
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(obj).encode())
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     def _raw(self, data, code=200):
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(data)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     def log_message(self, fmt, *args):
         msg = args[0] if args else ""

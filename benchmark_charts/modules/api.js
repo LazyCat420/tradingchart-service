@@ -17,8 +17,24 @@ import { getVLLM, getMODEL } from './state.js';
  * @returns {Promise<Array>} Array of OHLCV row objects.
  * @throws {Error} On network failure, timeout, or empty data.
  */
+
+// Domain sharding to bypass the browser's 6-connection HTTP/1.1 limit
+let shardIdx = 0;
+function getApiHost() {
+  const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  if (!isLocal) return '';
+  const port = window.location.port ? ':' + window.location.port : '';
+  const origins = [
+    `http://localhost${port}`,
+    `http://127.0.0.1${port}`
+  ];
+  const origin = origins[shardIdx];
+  shardIdx = (shardIdx + 1) % origins.length;
+  return origin;
+}
+
 export async function fetchData(symbol, range, interval) {
-  const url = `/api/data?symbol=${symbol}&period=${range}&interval=${interval}`;
+  const url = `${getApiHost()}/api/data?symbol=${symbol}&period=${range}&interval=${interval}`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
 
@@ -59,11 +75,21 @@ export async function singleStreamLLM(messages, onChunk) {
   };
 
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+  
+  // We only start the timeout AFTER the connection is established to avoid penalizing
+  // requests that are queued by the browser's HTTP/1.1 max-concurrent-connections limit (6).
+  let timeout = null;
+  const resetInactivityTimeout = () => {
+    if (timeout) clearTimeout(timeout);
+    timeout = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+  };
+
+  const reqId = Math.random().toString(36).substring(2, 6).toUpperCase();
+  console.log(`⏳ [LLM ${reqId}] Request initialized. If > 6 active, browser will queue this...`);
 
   let res;
   try {
-    res = await fetch('/api/llm/stream', {
+    res = await fetch(`${getApiHost()}/api/llm/stream`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
@@ -72,14 +98,16 @@ export async function singleStreamLLM(messages, onChunk) {
       body: JSON.stringify(payload),
       signal: ctrl.signal,
     });
+    console.log(`⚡ [LLM ${reqId}] Connection established! Starting 120s inactivity timer.`);
+    resetInactivityTimeout();
   } catch (e) {
-    clearTimeout(timeout);
-    if (e.name === 'AbortError') throw new Error(`LLM timeout after ${LLM_TIMEOUT_MS / 1000}s`);
+    if (timeout) clearTimeout(timeout);
+    if (e.name === 'AbortError') throw new Error(`LLM timeout: Stream inactive for ${LLM_TIMEOUT_MS / 1000}s`);
     throw e;
   }
 
   if (!res.ok) {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     throw new Error(`vLLM error: ${res.status} ${await res.text()}`);
   }
 
@@ -93,6 +121,9 @@ export async function singleStreamLLM(messages, onChunk) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      
+      resetInactivityTimeout(); // Reset timer on every incoming chunk!
+      
       buf += dec.decode(value, { stream: true });
       const lines = buf.split('\n');
       buf = lines.pop();
@@ -111,7 +142,8 @@ export async function singleStreamLLM(messages, onChunk) {
       }
     }
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
+    console.log(`✅ [LLM ${reqId}] Stream fully completed.`);
   }
 
   return { content, reasoning };

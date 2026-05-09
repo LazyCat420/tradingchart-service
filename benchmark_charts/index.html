@@ -89,7 +89,12 @@
         <span class="strat-counter" id="strat-counter">—</span>
         <button class="nav-btn" onclick="nextStrategy()">▶</button>
       </div>
-      <button class="ab re" onclick="generateMore()">↻ Generate More</button>
+      <div style="display:flex;gap:4px;width:100%;margin-bottom:4px">
+        <button class="ab re" style="flex:1" onclick="generateSpecific('short')">↻ Daily</button>
+        <button class="ab re" style="flex:1" onclick="generateSpecific('medium')">↻ Weekly</button>
+        <button class="ab re" style="flex:1" onclick="generateSpecific('long')">↻ Monthly</button>
+        <button class="ab re" style="flex:1.5;background:rgba(167,139,250,.15);border-color:rgba(167,139,250,.3);color:#a78bfa" onclick="generateAll()">↻ ALL</button>
+      </div>
       <button class="ab sc" onclick="scoreStrategies()">★ Score Strategies</button>
       <button class="ab rj" style="background:transparent;border:1px solid rgba(248,113,113,.4);color:var(--rd);margin-top:auto" onclick="clearAll()">🗑 Clear All</button>
     </div>

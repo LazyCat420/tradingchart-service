@@ -11,7 +11,7 @@ import {
   switchModel, prevStrategy, nextStrategy, updateAgentLogPanel,
   showTimeframe,
 } from './modules/ui.js';
-import { runAnalysis, generateMore, scoreStrategies } from './modules/engine.js';
+import { runAnalysis, generateSpecific, generateAll, scoreStrategies } from './modules/engine.js';
 
 // ── file:// protocol guard ──
 if (location.protocol === 'file:') {
@@ -27,7 +27,8 @@ if (location.protocol === 'file:') {
 window.switchModel = switchModel;
 window.switchTimeframe = switchTimeframe;
 window.runAnalysis = runAnalysis;
-window.generateMore = generateMore;
+window.generateSpecific = generateSpecific;
+window.generateAll = generateAll;
 window.scoreStrategies = scoreStrategies;
 window.prevStrategy = prevStrategy;
 window.nextStrategy = nextStrategy;
@@ -89,18 +90,24 @@ setInterval(() => {
  * Mutates the model entry in-place (name, model, ready).
  */
 async function probeModel(m) {
-  const baseUrl = m.endpoint.replace('/chat/completions', '');
   const ip = m.id; // '141' or '30'
 
-  // Step 1: Health check
+  // Step 1: Health check via proxy
   let healthy = false;
+  let status = 200;
   try {
-    const healthRes = await fetch(baseUrl.replace('/v1', '') + '/health', {
+    const healthRes = await fetch('/api/llm/health', {
+      headers: { 'x-vllm-endpoint': m.endpoint },
       signal: AbortSignal.timeout(5000),
+      cache: 'no-store'
     });
+    status = healthRes.status;
     healthy = healthRes.ok; // 200 = ready, 503 = loading
-  } catch {
-    // Server completely unreachable
+  } catch (e) {
+    status = 0;
+  }
+
+  if (status === 502 || status === 0) {
     m.name = `Offline (${ip})`;
     m.model = '';
     m.ready = false;
@@ -116,10 +123,12 @@ async function probeModel(m) {
     return;
   }
 
-  // Step 2: Fetch model name (only if healthy)
+  // Step 2: Fetch model name (only if healthy) via proxy
   try {
-    const modelsRes = await fetch(baseUrl + '/models', {
+    const modelsRes = await fetch('/api/llm/models', {
+      headers: { 'x-vllm-endpoint': m.endpoint },
       signal: AbortSignal.timeout(5000),
+      cache: 'no-store'
     });
     const data = await modelsRes.json();
     if (data && data.data && data.data.length > 0) {
@@ -127,7 +136,8 @@ async function probeModel(m) {
       const shortName = m.model.split('/').pop()
         .replace('.w4a16', '')
         .replace('-FP8', '')
-        .replace('quantized.', '');
+        .replace('quantized.', '')
+        .replace('-quantized', ''); // Added extra cleanup just in case
       m.name = `${shortName} (${ip})`;
       m.ready = true;
       console.log(`[PROBE] ${ip}: ready — ${m.model}`);
