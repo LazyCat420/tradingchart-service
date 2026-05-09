@@ -19,7 +19,7 @@ import { parseResponse, tryParsePartial } from './json-utils.js';
 import { addMemoryEntry } from './memory.js';
 import { renderChart, renderEmptyChart } from './chart.js';
 import {
-  $, renderList, updateSpinner, updatePills, updateBottom,
+  $, renderList, updateSpinner, updateProgressBar, updatePills, updateBottom,
   updateTfTabs, updateAgentLogPanel, updateStrategyCarousel,
   selectItem, showTimeframe,
 } from './ui.js';
@@ -39,16 +39,20 @@ import {
  * @param {string} macroContext - Higher-timeframe context.
  * @returns {Promise<{ spec: object, reasoning: string }>}
  */
-async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, macroContext) {
+async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, macroContext, specRef) {
   const t = state.tickers[tickerIdx];
   const tfd = t.tf[tfConfig.id];
-  tfd.liveContent = '⏳ Starting agentic analysis...';
+  
   const toolLog = [];
-  tfd.toolLog = toolLog;
+  specRef.toolLog = toolLog;
+  specRef.analysis = '⏳ Starting agentic analysis...';
 
   if (isCurrentView(tickerIdx, tfConfig.id)) {
-    $('analysis-text').textContent = tfd.liveContent;
-    updateAgentLogPanel(toolLog);
+    const activeSpec = tfd.prevSpecs[state.activeStratIdx];
+    if (activeSpec === specRef) {
+      $('analysis-text').textContent = specRef.analysis;
+      updateAgentLogPanel(toolLog);
+    }
   }
 
   const messages = [
@@ -62,8 +66,11 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
   // ── Tool-calling rounds ──
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const onChunk = ({ content, reasoning }) => {
-      tfd.liveContent = content;
+      specRef.analysis = content;
       if (!isCurrentView(tickerIdx, tfConfig.id)) return;
+      const activeSpec = tfd.prevSpecs[state.activeStratIdx];
+      if (activeSpec !== specRef) return;
+
       $('analysis-text').textContent = content;
       $('analysis-text').scrollTop = $('analysis-text').scrollHeight;
       // Progressive chart rendering
@@ -71,8 +78,8 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
         const partial = tryParsePartial(content);
         if (partial && partial.overlays) {
           const overlaysStr = JSON.stringify(partial.overlays);
-          if (tfd._lastOverlays !== overlaysStr) {
-            tfd._lastOverlays = overlaysStr;
+          if (specRef._lastOverlays !== overlaysStr) {
+            specRef._lastOverlays = overlaysStr;
             renderChart(tfd.data, partial, symbol, tfConfig.label);
           }
         }
@@ -90,7 +97,9 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
     // Execute the tool
     const logEntry = { round, tool: call.tool, params: call.params, status: 'calling', result: '', elapsed: 0 };
     toolLog.push(logEntry);
-    if (isCurrentView(tickerIdx, tfConfig.id)) updateAgentLogPanel(toolLog);
+    if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+      updateAgentLogPanel(toolLog);
+    }
 
     const startMs = Date.now();
     try {
@@ -101,27 +110,29 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
       logEntry.status = 'error';
     }
     logEntry.elapsed = Date.now() - startMs;
-    if (isCurrentView(tickerIdx, tfConfig.id)) updateAgentLogPanel(toolLog);
+    if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+      updateAgentLogPanel(toolLog);
+    }
 
     // Inject tool result back into conversation
     messages.push({ role: 'assistant', content });
     messages.push({ role: 'user', content: `TOOL_RESULT for ${call.tool}:\n${logEntry.result}\n\nContinue your analysis. Call another tool or output your final JSON.` });
 
-    tfd.liveContent = `🔄 Round ${round + 2}/${MAX_TOOL_ROUNDS} — ${toolLog.length} tool(s) called...`;
-    if (isCurrentView(tickerIdx, tfConfig.id)) {
-      $('analysis-text').textContent = tfd.liveContent;
+    specRef.analysis = `🔄 Round ${round + 2}/${MAX_TOOL_ROUNDS} — ${toolLog.length} tool(s) called...`;
+    if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+      $('analysis-text').textContent = specRef.analysis;
     }
   }
-
-  tfd.toolLog = toolLog;
 
   // Try to parse final response, with one JSON-forcing retry
   try {
     return parseResponse(lastContent, lastReasoning, symbol);
   } catch (parseErr) {
     console.warn(`[${symbol}] Parse failed: ${parseErr.message}. JSON-forcing retry...`);
-    tfd.liveContent = '🔧 Fixing output format...';
-    if (isCurrentView(tickerIdx, tfConfig.id)) $('analysis-text').textContent = tfd.liveContent;
+    specRef.analysis = '🔧 Fixing output format...';
+    if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+      $('analysis-text').textContent = specRef.analysis;
+    }
 
     messages.push({ role: 'assistant', content: lastContent });
     messages.push({ role: 'user', content: 'Your previous output was not valid JSON. Output ONLY the raw JSON object now — no text, no markdown. Start with { and end with }.' });
@@ -131,7 +142,7 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
 }
 
 // ── Save one iteration result to ticker state + memory ──
-function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning) {
+function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning, specRef) {
   const lens = STRATEGY_LENSES[(iter - 1) % STRATEGY_LENSES.length];
   tfd.spec = spec;
   tfd.reasoning = reasoning;
@@ -139,23 +150,18 @@ function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning) {
   tfd.strategy_name = spec.strategy_name || '';
   tfd.confidence = spec.confidence || 0;
   tfd.iterations = iter;
-  tfd.liveContent = tfd.analysis;
-  tfd.liveReasoning = reasoning;
 
-  tfd.prevSpecs.push({
-    iteration: iter,
-    strategy_name: tfd.strategy_name,
-    confidence: tfd.confidence,
-    analysis: tfd.analysis,
-    overlays: spec.overlays || [],
-    lens: lens.id,
-    prediction: spec.prediction || null,
-    created_at: new Date().toISOString(),
-    snapshot_close: tfd.data[tfd.data.length - 1]?.close || 0,
-    snapshot_date: tfd.data[tfd.data.length - 1]?.date || '',
-    tools_used: spec.tools_used || (tfd.toolLog || []).map(tl => tl.tool),
-    forward_result: null,
-  });
+  specRef.status = 'success';
+  specRef.strategy_name = tfd.strategy_name;
+  specRef.confidence = tfd.confidence;
+  specRef.analysis = tfd.analysis;
+  specRef.overlays = spec.overlays || [];
+  specRef.prediction = spec.prediction || null;
+  specRef.created_at = new Date().toISOString();
+  specRef.snapshot_close = tfd.data[tfd.data.length - 1]?.close || 0;
+  specRef.snapshot_date = tfd.data[tfd.data.length - 1]?.date || '';
+  specRef.tools_used = spec.tools_used || (specRef.toolLog || []).map(tl => tl.tool);
+  specRef.forward_result = null;
 
   addMemoryEntry(t.symbol, {
     timestamp: new Date().toISOString(),
@@ -194,10 +200,13 @@ function activateTimeframeTab(tickerIdx, t, tfKey, tfConfig) {
   if (state.activeIdx !== tickerIdx) return;
   const tfd = t.tf[tfKey];
   
-  if (!state.userLockedTF && state.activeTF !== tfKey) {
-    state.activeTF = tfKey;
-    document.querySelectorAll('.tf-tab').forEach(b => b.classList.toggle('active', b.dataset.tf === tfKey));
+  // BUG FIX: Prevent parallel timeframes from fighting for activeTF.
+  // If the user hasn't locked the tab, default to 'short' to prevent the last parallel promise ('long') from hijacking the view.
+  if (!state.userLockedTF && state.activeTF !== 'short') {
+    state.activeTF = 'short';
+    document.querySelectorAll('.tf-tab').forEach(b => b.classList.toggle('active', b.dataset.tf === 'short'));
   }
+
   if (state.activeTF === tfKey && tfd.data) {
     renderChart(tfd.data, { overlays: [] }, t.symbol, tfConfig.label);
   }
@@ -209,6 +218,36 @@ async function executeSingleIteration(tickerIdx, t, tfKey, it, macroContext) {
   let lastErr = null;
   let succeeded = false;
 
+  // Stub the strategy so the user can select it in the UI while it's running
+  tfd.prevSpecs = tfd.prevSpecs || [];
+  let specRef = tfd.prevSpecs.find(s => s.iteration === it);
+  if (!specRef) {
+    specRef = {
+      iteration: it,
+      status: 'running',
+      analysis: '⏳ Starting agentic analysis...',
+      overlays: [],
+      toolLog: [],
+      lens: STRATEGY_LENSES[(it - 1) % STRATEGY_LENSES.length].id,
+      strategy_name: 'Analyzing...'
+    };
+    tfd.prevSpecs.push(specRef);
+  } else {
+    specRef.status = 'running';
+    specRef.analysis = '🔄 Retrying...';
+    specRef.toolLog = [];
+  }
+
+  // Update carousel to automatically focus on the first newly active iteration
+  if (isCurrentView(tickerIdx, tfKey)) {
+    const idx = tfd.prevSpecs.indexOf(specRef);
+    if (state.activeStratIdx < tfd.prevSpecs.length - 1 && tfd.prevSpecs[state.activeStratIdx].status !== 'running') {
+      state.activeStratIdx = idx;
+      updateStrategyCarousel(t, tfKey);
+      showTimeframe(t, tfKey);
+    }
+  }
+
   for (let attempt = 0; attempt <= MAX_RETRIES_PER_ITER; attempt++) {
     try {
       const label = attempt > 0 ? ` (retry ${attempt})` : '';
@@ -219,14 +258,16 @@ async function executeSingleIteration(tickerIdx, t, tfKey, it, macroContext) {
       }
       if (attempt > 0) {
         console.log(`[${t.symbol}/${tfKey}] Retrying iter ${it}...`);
-        tfd.liveContent = `🔄 Retrying iter ${it}...`;
-        if (isCurrentView(tickerIdx, tfKey)) $('analysis-text').textContent = tfd.liveContent;
+        specRef.analysis = `🔄 Retrying iter ${it}...`;
+        if (isCurrentView(tickerIdx, tfKey) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+           $('analysis-text').textContent = specRef.analysis;
+        }
       }
 
-      const { spec, reasoning } = await agenticLLMLoop(tickerIdx, t.symbol, tfd.data, it, tfd.prevSpecs, tfConfig, macroContext);
-      saveIterationResult(t, tfd, tfKey, it, spec, reasoning);
+      const { spec, reasoning } = await agenticLLMLoop(tickerIdx, t.symbol, tfd.data, it, tfd.prevSpecs, tfConfig, macroContext, specRef);
+      saveIterationResult(t, tfd, tfKey, it, spec, reasoning, specRef);
 
-      if (isCurrentView(tickerIdx, tfKey)) {
+      if (isCurrentView(tickerIdx, tfKey) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
         renderChart(tfd.data, spec, t.symbol, tfConfig.label);
         updateBottom(t);
       }
@@ -241,9 +282,16 @@ async function executeSingleIteration(tickerIdx, t, tfKey, it, macroContext) {
 
   if (!succeeded) {
     console.error(`[${t.symbol}/${tfKey}] iter ${it} failed after retries.`);
-    tfd.liveContent = `⚠ iter ${it} failed: ${lastErr?.message || 'unknown'}`;
-    if (isCurrentView(tickerIdx, tfKey)) $('analysis-text').textContent = tfd.liveContent;
+    specRef.status = 'error';
+    specRef.analysis = `⚠ iter ${it} failed: ${lastErr?.message || 'unknown'}`;
+    if (isCurrentView(tickerIdx, tfKey) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+      $('analysis-text').textContent = specRef.analysis;
+    }
   }
+
+  // Update progress bar
+  state.progressDone++;
+  updateProgressBar();
 }
 
 async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
@@ -271,7 +319,9 @@ async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
   activateTimeframeTab(tickerIdx, t, tfKey, tfConfig);
 
   state.runningCount += iters;
+  state.progressTotal += iters;
   updateSpinner();
+  updateProgressBar();
   
   try {
     const iterPromises = [];
@@ -289,6 +339,13 @@ async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
     updateTfTabs(t);
     renderList();
 
+    // BUG FIX: Immediately render data on the frontend for this timeframe if we're looking at it.
+    if (isCurrentView(tickerIdx, tfKey)) {
+        state.activeStratIdx = Math.max(0, (tfd.prevSpecs?.length || 1) - 1);
+        updateStrategyCarousel(t, tfKey);
+        showTimeframe(t, tfKey);
+    }
+
     if (tfd.spec) {
       const dir = tfd.spec.prediction?.direction || 'UNKNOWN';
       const tgt = tfd.spec.prediction?.target_price || '?';
@@ -298,6 +355,7 @@ async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
   } finally {
     state.runningCount -= iters;
     updateSpinner();
+    updateProgressBar();
   }
 }
 
@@ -386,7 +444,9 @@ export async function generateSpecific(tfKey) {
   t.status = 'running';
   tfd.status = 'running';
   state.runningCount += itersToRun; // Increment by exact parallel requests for UI transparency
+  state.progressTotal += itersToRun;
   updateSpinner();
+  updateProgressBar();
   renderList();
 
   try {
@@ -413,6 +473,7 @@ export async function generateSpecific(tfKey) {
   } finally {
     state.runningCount -= itersToRun;
     updateSpinner();
+    updateProgressBar();
     renderList();
     updatePills();
     updateTfTabs(t);

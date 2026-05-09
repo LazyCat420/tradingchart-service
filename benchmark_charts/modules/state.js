@@ -13,6 +13,8 @@ export const state = {
   activeStratIdx: 0,
   userLockedTF: false,
   activeModelIdx: parseInt(localStorage.getItem('aql_model_idx') || '0'),
+  progressTotal: 0,
+  progressDone: 0,
 };
 
 // Clamp model index

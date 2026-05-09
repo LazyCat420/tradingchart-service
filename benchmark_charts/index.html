@@ -12,6 +12,10 @@
 
 <canvas id="bg-canvas"></canvas>
 
+<div id="progress-container" style="display:none; position:fixed; top:0; left:0; width:100%; height:3px; background:rgba(0,0,0,0.5); z-index:9999;">
+  <div id="progress-bar" style="height:100%; width:0%; background:var(--cy); transition: width 0.3s ease; box-shadow: 0 0 10px var(--cy);"></div>
+</div>
+
 <div class="app">
   <div class="top">
     <div class="logo">◈ Agentic Quant Lab</div><div class="sep"></div>
@@ -67,9 +71,15 @@
 
   <div class="bottom">
     <div class="pan">
-      <div class="pan-h">
-        <h3>LLM Analysis</h3>
-        <div class="tag" style="background:rgba(88,166,255,.12);color:var(--cy)" id="ov-tag">—</div>
+      <div class="pan-h" style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="display:flex; gap:8px; align-items:center;">
+          <h3>LLM Analysis</h3>
+          <div class="tag" style="background:rgba(88,166,255,.12);color:var(--cy)" id="ov-tag">—</div>
+        </div>
+        <div class="strat-nav" style="background:transparent; border:none; padding:0; height:auto; gap:2px;">
+          <button class="nav-btn" onclick="prevStrategy()" style="padding:2px 6px;">◀</button>
+          <button class="nav-btn" onclick="nextStrategy()" style="padding:2px 6px;">▶</button>
+        </div>
       </div>
       <div class="pan-b summ" id="analysis-text">Submit tickers above to begin analysis.</div>
     </div>

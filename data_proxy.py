@@ -77,6 +77,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._raw(e.read() if hasattr(e, 'read') else b'', e.code)
                 except Exception as e:
                     self._json({"error": str(e)}, 502)
+            elif p.path == "/api/llm/metrics":
+                target = self.headers.get("x-vllm-endpoint", VLLM_ENDPOINT)
+                base = target.replace("/v1/chat/completions", "")
+                req = urllib.request.Request(f"{base}/metrics")
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        self._raw(resp.read(), resp.status, content_type="text/plain")
+                except urllib.error.HTTPError as e:
+                    self._raw(e.read() if hasattr(e, 'read') else b'', e.code, content_type="text/plain")
+                except Exception as e:
+                    self._json({"error": str(e)}, 502)
                 return
             super().do_GET()
 
@@ -122,6 +133,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(chunk)
                     self.wfile.flush()
                 resp.close()
+            except urllib.error.HTTPError as e:
+                err_body = e.read() if hasattr(e, 'read') else b''
+                self._raw(err_body, e.code)
             except Exception as e:
                 self._json({"error": str(e)}, 502)
         else:
@@ -136,10 +150,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass
 
-    def _raw(self, data, code=200):
+    def _raw(self, data, code=200, content_type="application/json"):
         try:
             self.send_response(code)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.end_headers()
             self.wfile.write(data)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):

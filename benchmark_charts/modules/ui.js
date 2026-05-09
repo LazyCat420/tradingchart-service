@@ -42,9 +42,28 @@ export function updateAgentLogPanel(toolLog) {
   $('tool-count-tag').textContent = toolLog.length + ' CALL' + (toolLog.length !== 1 ? 'S' : '');
 }
 
-// ── Spinner ──
+// ── Spinner & Progress Bar ──
 export function updateSpinner() {
   $('spinner').style.display = state.runningCount > 0 ? 'inline-block' : 'none';
+}
+
+export function updateProgressBar() {
+  const container = $('progress-container');
+  const bar = $('progress-bar');
+  if (state.runningCount === 0 || state.progressTotal <= 0) {
+    container.style.display = 'none';
+    bar.style.width = '0%';
+    setTimeout(() => {
+      if (state.runningCount === 0) {
+        state.progressTotal = 0;
+        state.progressDone = 0;
+      }
+    }, 500); // clear after fade
+  } else {
+    container.style.display = 'block';
+    const pct = Math.min(100, (state.progressDone / state.progressTotal) * 100);
+    bar.style.width = pct + '%';
+  }
 }
 
 // ── Pills (pass/fail/rate) ──
@@ -206,10 +225,14 @@ export function showTimeframe(t, tfKey) {
   }
 
   // Show text panels
-  if (tfd.status === 'running') {
-    $('analysis-text').textContent = tfd.liveContent || '⏳ Processing...';
-    updateAgentLogPanel(tfd.toolLog || []);
-    $('ov-tag').textContent = tfd.iterations ? tfd.iterations + ' strat' : 'streaming...';
+  if (viewSpec && viewSpec.status === 'running') {
+    $('analysis-text').textContent = viewSpec.analysis || '⏳ Processing...';
+    updateAgentLogPanel(viewSpec.toolLog || []);
+    $('ov-tag').textContent = 'streaming...';
+  } else if (viewSpec && viewSpec.status === 'error') {
+    $('analysis-text').textContent = viewSpec.analysis || '⚠ Error';
+    updateAgentLogPanel(viewSpec.toolLog || []);
+    $('ov-tag').textContent = 'error';
   } else {
     updateBottom(t);
   }

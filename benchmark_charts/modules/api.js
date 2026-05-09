@@ -3,148 +3,257 @@
  * Yahoo Finance data fetching + vLLM streaming.
  * All network calls live here. No DOM manipulation.
  */
-import { CORS_PROXY, FETCH_TIMEOUT_MS, LLM_TIMEOUT_MS } from './config.js';
-import { getVLLM, getMODEL } from './state.js';
+import { FETCH_TIMEOUT_MS, LLM_TIMEOUT_MS } from './config.js';
+import { getMODEL, getVLLM } from "./state.js";
+
+/**
+ * Gets a random API host to bypass the browser's 6-connection HTTP/1.1 limit.
+ * Uses Math.random() instead of state to maintain purity.
+ * @returns {string} The origin to use for the API call.
+ */
+function getApiHost() {
+	return "";
+}
 
 /**
  * Fetch OHLCV stock data from Yahoo Finance with timeout.
- * BUG FIX: Original had NO timeout — could hang forever, permanently
- * corrupting runningCount and leaving tickers stuck as "pending".
- *
- * @param {string} symbol - Ticker symbol (e.g. "NBIS").
- * @param {string} range - Time range (e.g. "3mo", "1y", "5y").
- * @param {string} interval - Candle interval (e.g. "1d", "1wk", "1mo").
+ * @param {string} symbol - Ticker symbol.
+ * @param {string} range - Time range.
+ * @param {string} interval - Candle interval.
  * @returns {Promise<Array>} Array of OHLCV row objects.
- * @throws {Error} On network failure, timeout, or empty data.
  */
+export async function fetchData(symbol, range, interval) {
+	if (!symbol || !range || !interval)
+		throw new Error("Missing required arguments for fetchData");
 
-// Domain sharding to bypass the browser's 6-connection HTTP/1.1 limit
-let shardIdx = 0;
-function getApiHost() {
-  const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-  if (!isLocal) return '';
-  const port = window.location.port ? ':' + window.location.port : '';
-  const origins = [
-    `http://localhost${port}`,
-    `http://127.0.0.1${port}`
-  ];
-  const origin = origins[shardIdx];
-  shardIdx = (shardIdx + 1) % origins.length;
-  return origin;
+	const url = `${getApiHost()}/api/data?symbol=${symbol}&period=${range}&interval=${interval}`;
+	const ctrl = new AbortController();
+	const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+
+	let res;
+	try {
+		res = await fetch(url, { signal: ctrl.signal });
+	} finally {
+		clearTimeout(timer);
+	}
+
+	if (!res.ok) throw new Error(`Data proxy error: ${res.status}`);
+
+	const json = await res.json();
+	if (json.error) throw new Error(json.error);
+	if (!json.data || json.data.length === 0)
+		throw new Error(`Empty dataset for ${symbol}`);
+
+	return json.data;
 }
 
-export async function fetchData(symbol, range, interval) {
-  const url = `${getApiHost()}/api/data?symbol=${symbol}&period=${range}&interval=${interval}`;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+/**
+ * Builds the payload for the vLLM API.
+ * @param {Array} messages - Chat messages array.
+ * @param {string} modelName - The model name to use.
+ * @returns {Object} The JSON payload.
+ */
+function buildLlmPayload(messages, modelName) {
+	return {
+		model: modelName,
+		messages,
+		max_tokens: 4000,
+		temperature: 0.2,
+		stream: true,
+	};
+}
 
-  let res;
-  try {
-    res = await fetch(url, { signal: ctrl.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+// ── Smart Concurrency Throttle ──
+const LOCAL_CONCURRENCY_LIMIT = 6;
+let activeRequests = 0;
+const requestQueue = [];
+let pumpTimer = null;
 
-  if (!res.ok) throw new Error(`Data proxy error: ${res.status}`);
+let capacityCheckPromise = null;
+let lastCapacityResult = true;
+let lastCapacityTime = 0;
 
-  const json = await res.json();
-  if (json.error) throw new Error(json.error);
-  
-  const data = json.data;
-  if (!data || data.length === 0) throw new Error(`Empty dataset for ${symbol} (${range}/${interval})`);
+/**
+ * Polls the backend proxy for vLLM metrics.
+ * Ensures the GPU KV cache is healthy and no requests are internally queued.
+ */
+async function getBackendCapacity() {
+	const now = Date.now();
+	if (now - lastCapacityTime < 2000) return lastCapacityResult;
+	
+	if (!capacityCheckPromise) {
+		capacityCheckPromise = (async () => {
+			try {
+				const res = await fetch(`/api/llm/metrics`, {
+					headers: { "x-vllm-endpoint": getVLLM() }
+				});
+				if (!res.ok) return true; // Fail open if metrics missing
+				const text = await res.text();
+				
+				const waitingMatch = text.match(/vllm:num_requests_waiting(?:\{.*?\})?\s+([0-9.]+)/);
+				const kvMatch = text.match(/vllm:gpu_kv_cache_usage(?:\{.*?\})?\s+([0-9.]+)/);
+				
+				const waiting = waitingMatch ? parseFloat(waitingMatch[1]) : 0;
+				const kvUsage = kvMatch ? parseFloat(kvMatch[1]) : 0;
+				
+				// Block if backend is internally queuing OR GPU is > 85% full
+				return (waiting === 0 && kvUsage < 0.85);
+			} catch {
+				return true; // Fail open
+			} finally {
+				lastCapacityTime = Date.now();
+				capacityCheckPromise = null;
+			}
+		})();
+	}
+	lastCapacityResult = await capacityCheckPromise;
+	return lastCapacityResult;
+}
 
-  console.log(`[API] Fetched ${data.length} rows for ${symbol} (${range}/${interval})`);
-  return data;
+async function pumpQueue() {
+	if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = null; }
+	if (requestQueue.length === 0) return;
+	if (activeRequests >= LOCAL_CONCURRENCY_LIMIT) return;
+
+	const safe = await getBackendCapacity();
+	if (safe) {
+		activeRequests++;
+		const next = requestQueue.shift();
+		next();
+		// Try to drain more if possible
+		pumpQueue();
+	} else {
+		pumpTimer = setTimeout(pumpQueue, 2000);
+	}
+}
+
+function acquireLock() {
+	return new Promise(resolve => {
+		requestQueue.push(resolve);
+		pumpQueue();
+	});
+}
+
+function releaseLock() {
+	activeRequests--;
+	pumpQueue();
+}
+
+/**
+ * Executes the POST request to the LLM proxy.
+ * @param {Object} payload - The request payload.
+ * @param {AbortController} ctrl - Abort controller for timeout.
+ * @param {string} endpoint - The exact vLLM endpoint to send to.
+ * @returns {Promise<Response>}
+ */
+async function executeLlmRequest(payload, ctrl, endpoint) {
+	return await fetch(`${getApiHost()}/api/llm/stream`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"x-vllm-endpoint": endpoint,
+		},
+		body: JSON.stringify(payload),
+		signal: ctrl.signal,
+	});
+}
+
+/**
+ * Parses the SSE stream from vLLM.
+ * @param {ReadableStreamDefaultReader} reader - The stream reader.
+ * @param {Function} resetTimeoutCallback - Callback to reset inactivity timer.
+ * @param {Function} onChunk - Callback for partial updates.
+ * @returns {Promise<{content: string, reasoning: string}>}
+ */
+async function parseSseStream(reader, resetTimeoutCallback, onChunk) {
+	const dec = new TextDecoder();
+	let reasoning = "";
+	let content = "";
+	let buf = "";
+
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+
+		resetTimeoutCallback();
+		buf += dec.decode(value, { stream: true });
+
+		const lines = buf.split("\n");
+		buf = lines.pop() || "";
+
+		for (const line of lines) {
+			if (!line.startsWith("data: ")) continue;
+			const j = line.slice(6).trim();
+			if (j === "[DONE]") continue;
+			try {
+				const delta = JSON.parse(j).choices?.[0]?.delta || {};
+				if (delta.reasoning_content) reasoning += delta.reasoning_content;
+				if (delta.content) {
+					content += delta.content;
+					if (onChunk) onChunk({ content, reasoning });
+				}
+			} catch {
+				/* skip malformed SSE lines */
+			}
+		}
+	}
+	return { content, reasoning };
 }
 
 /**
  * Stream a single LLM call. Returns accumulated content + reasoning.
- * Accepts an onChunk callback for progressive UI updates (no DOM coupling).
- *
  * @param {Array} messages - Chat messages array.
  * @param {function} onChunk - Callback: ({ content, reasoning }) => void
  * @returns {Promise<{ content: string, reasoning: string }>}
  */
 export async function singleStreamLLM(messages, onChunk) {
-  const payload = {
-    model: getMODEL(),
-    messages,
-    max_tokens: 4000,
-    temperature: 0.2,
-    stream: true,
-  };
+	if (!messages || !Array.isArray(messages))
+		throw new Error("Invalid messages array");
 
-  const ctrl = new AbortController();
-  
-  // We only start the timeout AFTER the connection is established to avoid penalizing
-  // requests that are queued by the browser's HTTP/1.1 max-concurrent-connections limit (6).
-  let timeout = null;
-  const resetInactivityTimeout = () => {
-    if (timeout) clearTimeout(timeout);
-    timeout = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
-  };
+	const ctrl = new AbortController();
+	let timeout = null;
+	const resetInactivityTimeout = () => {
+		if (timeout) clearTimeout(timeout);
+		timeout = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+	};
 
-  const reqId = Math.random().toString(36).substring(2, 6).toUpperCase();
-  console.log(`⏳ [LLM ${reqId}] Request initialized. If > 6 active, browser will queue this...`);
+	// Snapshot the currently selected model and endpoint 
+	// so they cannot drift during the queue wait time.
+	const targetModel = getMODEL();
+	const targetEndpoint = getVLLM();
+	const payload = buildLlmPayload(messages, targetModel);
 
-  let res;
-  try {
-    res = await fetch(`${getApiHost()}/api/llm/stream`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'x-vllm-endpoint': getVLLM()
-      },
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
-    console.log(`⚡ [LLM ${reqId}] Connection established! Starting 120s inactivity timer.`);
-    resetInactivityTimeout();
-  } catch (e) {
-    if (timeout) clearTimeout(timeout);
-    if (e.name === 'AbortError') throw new Error(`LLM timeout: Stream inactive for ${LLM_TIMEOUT_MS / 1000}s`);
-    throw e;
-  }
+	await acquireLock();
+	try {
+		const res = await executeLlmRequest(payload, ctrl, targetEndpoint);
+		resetInactivityTimeout();
 
-  if (!res.ok) {
-    if (timeout) clearTimeout(timeout);
-    throw new Error(`vLLM error: ${res.status} ${await res.text()}`);
-  }
+		if (!res.ok) {
+			let errMsg = `vLLM error: ${res.status}`;
+			try {
+				const errJson = await res.json();
+				if (errJson.error && errJson.error.message) {
+					errMsg = errJson.error.message;
+				} else if (errJson.error) {
+					errMsg = errJson.error;
+				}
+			} catch { /* ignore */ }
+			throw new Error(errMsg);
+		}
 
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let reasoning = '';
-  let content = '';
-  let buf = '';
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      resetInactivityTimeout(); // Reset timer on every incoming chunk!
-      
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const j = line.slice(6).trim();
-        if (j === '[DONE]') continue;
-        try {
-          const delta = JSON.parse(j).choices?.[0]?.delta || {};
-          if (delta.reasoning_content) reasoning += delta.reasoning_content;
-          if (delta.content) {
-            content += delta.content;
-            if (onChunk) onChunk({ content, reasoning });
-          }
-        } catch { /* skip malformed SSE lines */ }
-      }
-    }
-  } finally {
-    if (timeout) clearTimeout(timeout);
-    console.log(`✅ [LLM ${reqId}] Stream fully completed.`);
-  }
-
-  return { content, reasoning };
+		return await parseSseStream(
+			res.body.getReader(),
+			resetInactivityTimeout,
+			onChunk,
+		);
+	} catch (e) {
+		if (e.name === "AbortError")
+			throw new Error(
+				`LLM timeout: Stream inactive for ${LLM_TIMEOUT_MS / 1000}s`,
+			);
+		throw e;
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		releaseLock();
+	}
 }

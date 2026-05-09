@@ -72,6 +72,6 @@ export const STRATEGY_LENSES = [
 export const TOOL_TIMEOUT_MS = 10_000;
 export const TOOL_MAX_RESULT_CHARS = 2000;
 export const MAX_TOOL_ROUNDS = 5;
-export const LLM_TIMEOUT_MS = 120_000;
+export const LLM_TIMEOUT_MS = 240_000;
 export const MAX_RETRIES_PER_ITER = 1;
 export const FETCH_TIMEOUT_MS = 15_000;  // BUG FIX: original had NO timeout on Yahoo fetch
