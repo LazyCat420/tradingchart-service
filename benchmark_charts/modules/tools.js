@@ -205,7 +205,8 @@ export async function executeToolCall(toolName, params, data, symbol) {
 
 /** Parse TOOL_CALL directive from LLM output text. */
 export function parseToolCallDirective(text) {
-  const match = text.match(/TOOL_CALL:\s*(\w+)\(([^)]*)\)/);
+  // Handles standard, full-width colon, full-width parens, and markdown formatting
+  const match = text.match(/TOOL_CALL(?:[:：])?\s*\*?\*?\s*`?(\w+)`?[(\uff08]([^)\uff09]*)[)\uff09]/);
   if (!match) return null;
   return { tool: match[1], params: match[2].trim() };
 }

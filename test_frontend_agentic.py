@@ -96,11 +96,66 @@ def test_carousel_navigation(page: Page):
     page.goto(URL)
     
     # We just ensure the buttons are present and don't throw errors when clicked without data
-    prev_btn = page.locator("button[onclick='prevStrategy()']")
-    next_btn = page.locator("button[onclick='nextStrategy()']")
+    prev_btn = page.locator("button[onclick='prevStrategy()']").first
+    next_btn = page.locator("button[onclick='nextStrategy()']").first
     
     expect(prev_btn).to_be_visible()
     expect(next_btn).to_be_visible()
     
     prev_btn.click()
     next_btn.click()
+
+def test_agentic_tool_loop(page: Page):
+    """Test that the agentic tool loop successfully executes tool calls, updates the log panel, and then renders the chart without getting stuck."""
+    page.goto(URL)
+    page.evaluate("window.localStorage.clear();")
+    page.reload()
+    
+    page.route("**/api/data*", lambda route: route.fulfill(
+        status=200,
+        json={"symbol": "NVDA", "period": "3mo", "data": [
+            {"date":"2026-05-01","open":100,"high":110,"low":90,"close":105,"volume":1000}
+        ]}
+    ))
+    
+    # We will simulate 2 chunks of stream data.
+    # Chunk 1: A tool call formatted similarly to Qwen (with markdown)
+    # Chunk 2: The final JSON output
+    # Playwright's `route.fulfill` doesn't easily do chunked streaming out of the box,
+    # so we will simulate it by returning the full response immediately but we must
+    # include the markdown tool call to ensure the regex catches it.
+    
+    call_count = [0]
+    
+    def handle_llm_stream(route):
+        if call_count[0] == 0:
+            call_count[0] += 1
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body='data: {"choices":[{"delta":{"content":"**TOOL_CALL: CALC_RSI()**\\n"}}]}\n\n'
+            )
+        else:
+            route.fulfill(
+                status=200,
+                headers={"Content-Type": "text/event-stream"},
+                body='data: {"choices":[{"delta":{"content":"```json\\n{\\"overlays\\\":[{\\"kind\\\":\\"line\\",\\"x0\\\":\\"2026-05-01\\",\\"y0\\\":100,\\"x1\\\":\\"2026-05-10\\",\\"y1\\\":100,\\"color\\\":\\"green\\",\\"label\\\":\\"test\\"}]}\\n```"}}]}\n\n'
+            )
+
+    page.route("**/api/llm/stream", handle_llm_stream)
+    
+    page.locator("#ticker-input").fill("NVDA")
+    # Only run 1 iteration total to prevent parallel requests from stealing the mock counter
+    page.locator("#iter-short").fill("1")
+    page.locator("#iter-medium").fill("0")
+    page.locator("#iter-long").fill("0")
+    page.locator(".run-btn").click()
+    
+    # Wait for the iteration to complete
+    expect(page.locator(".sym").first).to_have_text("NVDA")
+    
+    # Verify the tool log says 1 CALL
+    expect(page.locator("#tool-count-tag")).to_have_text(re.compile(r"1 CALL"))
+    
+    # Verify the chart has been rendered (the tag updates with overlay count)
+    expect(page.locator("#ov-tag")).to_contain_text("strat")

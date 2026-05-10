@@ -64,7 +64,7 @@ function buildLlmPayload(messages, modelName) {
 }
 
 // ── Smart Concurrency Throttle ──
-const LOCAL_CONCURRENCY_LIMIT = 5;
+const LOCAL_CONCURRENCY_LIMIT = 15;
 let activeRequests = 0;
 const requestQueue = [];
 let pumpTimer = null;
@@ -97,8 +97,8 @@ async function getBackendCapacity() {
 				const waiting = waitingMatch ? parseFloat(waitingMatch[1]) : 0;
 				const kvUsage = kvMatch ? parseFloat(kvMatch[1]) : 0;
 				
-				// Block if backend is internally queuing OR GPU is > 85% full
-				return (waiting === 0 && kvUsage < 0.85);
+				// Block if backend is internally queuing
+				return (waiting === 0);
 			} catch {
 				return true; // Fail open
 			} finally {
@@ -200,23 +200,31 @@ async function parseSseStream(reader, resetTimeoutCallback, onChunk) {
 		for (const line of lines) {
 			if (!line.startsWith("data: ")) continue;
 			const j = line.slice(6).trim();
-			if (j === "[DONE]") continue;
+			if (j === "[DONE]") {
+				try { reader.cancel(); } catch { /* ignore */ }
+				return { content, reasoning };
+			}
 			try {
 				const delta = JSON.parse(j).choices?.[0]?.delta || {};
 				if (delta.reasoning_content) reasoning += delta.reasoning_content;
-				if (delta.content) {
-					content += delta.content;
-					if (onChunk) {
-						const stop = onChunk({ content, reasoning });
-						if (stop) {
-							// Return early, closing the stream
-							try { reader.cancel(); } catch { /* ignore */ }
-							return { content, reasoning };
-						}
+				if (delta.content) content += delta.content;
+				
+				if ((delta.content || delta.reasoning_content) && onChunk) {
+					let stop = false;
+					try {
+						stop = onChunk({ content, reasoning });
+					} catch (chunkErr) {
+						console.error("[API] onChunk error:", chunkErr);
+					}
+					if (stop) {
+						// Return early, closing the stream
+						try { reader.cancel(); } catch { /* ignore */ }
+						return { content, reasoning };
 					}
 				}
-			} catch {
-				/* skip malformed SSE lines */
+			} catch (e) {
+				/* skip malformed SSE lines only if it's a JSON parse error, don't swallow onChunk errors */
+				if (e.name !== 'SyntaxError') console.error("[API] SSE loop error:", e);
 			}
 		}
 	}
@@ -247,6 +255,7 @@ export async function singleStreamLLM(messages, onChunk) {
 	const payload = buildLlmPayload(messages, targetModel);
 
 	await acquireLock();
+	resetInactivityTimeout(); // Protect TTFT
 	try {
 		const res = await executeLlmRequest(payload, ctrl, targetEndpoint);
 		resetInactivityTimeout();

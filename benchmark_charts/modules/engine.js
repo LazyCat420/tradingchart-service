@@ -87,7 +87,7 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
       }
 
       // 🛑 Abort stream immediately if a tool call is fully typed out to prevent doom loops
-      if (parseToolCallDirective(content)) return true;
+      if (parseToolCallDirective(content) || (reasoning && parseToolCallDirective(reasoning))) return true;
     };
 
     const { content, reasoning } = await singleStreamLLM(messages, onChunk);
@@ -95,7 +95,8 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
     lastReasoning = reasoning;
 
     // Check for tool call
-    const call = parseToolCallDirective(content);
+    let call = parseToolCallDirective(content);
+    if (!call && reasoning) call = parseToolCallDirective(reasoning);
     if (!call) break; // No tool call — this is the final answer
 
     // Execute the tool
@@ -332,8 +333,9 @@ async function processTimeframe(tickerIdx, t, tfKey, iters, macroContext) {
   
   try {
     const iterPromises = [];
+    const baseLen = tfd.prevSpecs?.length || 0;
     for (let i = 0; i < iters; i++) {
-      const it = (tfd.prevSpecs?.length || 0) + i + 1;
+      const it = baseLen + i + 1;
       iterPromises.push(executeSingleIteration(tickerIdx, t, tfKey, it, macroContext));
     }
     await Promise.allSettled(iterPromises);
@@ -463,8 +465,9 @@ export async function generateSpecific(tfKey) {
     saveTickerData(t.symbol, tfKey, tfd.data);
 
     const iterPromises = [];
+    const baseLen = tfd.prevSpecs?.length || 0;
     for (let i = 0; i < itersToRun; i++) {
-      const it = (tfd.prevSpecs?.length || 0) + i + 1;
+      const it = baseLen + i + 1;
       iterPromises.push(executeSingleIteration(state.activeIdx, t, tfKey, it, ''));
     }
     await Promise.allSettled(iterPromises);

@@ -61,8 +61,8 @@ export function extractJSON(content) {
   if (c.startsWith('<think>')) {
     c = '';
   }
-  // Strip residual TOOL_CALL lines
-  c = c.replace(/TOOL_CALL:\s*\w+\([^)]*\)/g, '').trim();
+  // Strip residual TOOL_CALL lines (robust)
+  c = c.replace(/TOOL_CALL(?:[:：])?\s*\*?\*?\s*`?\w+`?[(\uff08][^)\uff09]*[)\uff09]/g, '').trim();
   // Find JSON boundaries
   const si = c.indexOf('{');
   const ei = c.lastIndexOf('}') + 1;
@@ -128,7 +128,7 @@ export function tryParsePartial(content) {
   let c = content.replace(/```json/g, '').replace(/```/g, '').trim();
   if (c.includes('</think>')) c = c.slice(c.indexOf('</think>') + 8).trim();
   if (c.startsWith('<think>')) return null;
-  c = c.replace(/TOOL_CALL:\s*\w+\([^)]*\)/g, '').trim();
+  c = c.replace(/TOOL_CALL(?:[:：])?\s*\*?\*?\s*`?\w+`?[(\uff08][^)\uff09]*[)\uff09]/g, '').trim();
   const si = c.indexOf('{');
   if (si === -1) return null;
   c = c.slice(si);
