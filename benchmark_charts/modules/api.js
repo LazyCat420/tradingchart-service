@@ -64,7 +64,7 @@ function buildLlmPayload(messages, modelName) {
 }
 
 // ── Smart Concurrency Throttle ──
-const LOCAL_CONCURRENCY_LIMIT = 6;
+const LOCAL_CONCURRENCY_LIMIT = 5;
 let activeRequests = 0;
 const requestQueue = [];
 let pumpTimer = null;
@@ -85,7 +85,8 @@ async function getBackendCapacity() {
 		capacityCheckPromise = (async () => {
 			try {
 				const res = await fetch(`/api/llm/metrics`, {
-					headers: { "x-vllm-endpoint": getVLLM() }
+					headers: { "x-vllm-endpoint": getVLLM() },
+					signal: AbortSignal.timeout(2000)
 				});
 				if (!res.ok) return true; // Fail open if metrics missing
 				const text = await res.text();
@@ -110,32 +111,47 @@ async function getBackendCapacity() {
 	return lastCapacityResult;
 }
 
-async function pumpQueue() {
-	if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = null; }
-	if (requestQueue.length === 0) return;
-	if (activeRequests >= LOCAL_CONCURRENCY_LIMIT) return;
+let isPumping = false;
 
-	const safe = await getBackendCapacity();
-	if (safe) {
-		activeRequests++;
-		const next = requestQueue.shift();
-		next();
-		// Try to drain more if possible
-		pumpQueue();
-	} else {
-		pumpTimer = setTimeout(pumpQueue, 2000);
+async function pumpQueue() {
+	if (isPumping) return;
+	isPumping = true;
+
+	try {
+		if (pumpTimer) { clearTimeout(pumpTimer); pumpTimer = null; }
+
+		while (requestQueue.length > 0 && activeRequests < LOCAL_CONCURRENCY_LIMIT) {
+			const safe = await getBackendCapacity();
+			if (!safe) {
+				pumpTimer = setTimeout(pumpQueue, 2000);
+				return;
+			}
+			
+			if (requestQueue.length === 0) break;
+
+			activeRequests++;
+			const next = requestQueue.shift();
+			if (next) {
+				console.log(`[API] 🚀 Dispatching request. Active: ${activeRequests}/${LOCAL_CONCURRENCY_LIMIT}. Queue: ${requestQueue.length}`);
+				next();
+			}
+		}
+	} finally {
+		isPumping = false;
 	}
 }
 
 function acquireLock() {
 	return new Promise(resolve => {
 		requestQueue.push(resolve);
+		console.log(`[API] 📥 Queued request. Active: ${activeRequests}/${LOCAL_CONCURRENCY_LIMIT}. Queue: ${requestQueue.length}`);
 		pumpQueue();
 	});
 }
 
 function releaseLock() {
 	activeRequests--;
+	console.log(`[API] 🏁 Request finished. Active: ${activeRequests}/${LOCAL_CONCURRENCY_LIMIT}. Queue: ${requestQueue.length}`);
 	pumpQueue();
 }
 
@@ -190,7 +206,14 @@ async function parseSseStream(reader, resetTimeoutCallback, onChunk) {
 				if (delta.reasoning_content) reasoning += delta.reasoning_content;
 				if (delta.content) {
 					content += delta.content;
-					if (onChunk) onChunk({ content, reasoning });
+					if (onChunk) {
+						const stop = onChunk({ content, reasoning });
+						if (stop) {
+							// Return early, closing the stream
+							try { reader.cancel(); } catch { /* ignore */ }
+							return { content, reasoning };
+						}
+					}
 				}
 			} catch {
 				/* skip malformed SSE lines */

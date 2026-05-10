@@ -16,10 +16,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=STATIC_DIR, **kw)
 
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass # Suppress stack traces when browser refreshes or closes connection abruptly
+
+
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, x-vllm-endpoint")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        # Prevent browser caching of JS/CSS during development
+        if hasattr(self, 'path') and any(self.path.endswith(ext) for ext in ('.js', '.css', '.html')):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         super().end_headers()
 
     def do_OPTIONS(self):
@@ -77,6 +87,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     self._raw(e.read() if hasattr(e, 'read') else b'', e.code)
                 except Exception as e:
                     self._json({"error": str(e)}, 502)
+                return
             elif p.path == "/api/llm/metrics":
                 target = self.headers.get("x-vllm-endpoint", VLLM_ENDPOINT)
                 base = target.replace("/v1/chat/completions", "")
@@ -136,6 +147,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             except urllib.error.HTTPError as e:
                 err_body = e.read() if hasattr(e, 'read') else b''
                 self._raw(err_body, e.code)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass # Client disconnected during stream
             except Exception as e:
                 self._json({"error": str(e)}, 502)
         else:

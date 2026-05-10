@@ -157,11 +157,20 @@ async function probeModel(m) {
 
 /**
  * Probe all models and update the UI.
+ * Only triggers a full switchModel if model state actually changed.
  */
+let _prevModelFingerprint = '';
 async function probeAllModels() {
   await Promise.all(MODELS.map(probeModel));
   updateModelDropdown();
-  switchModel(state.activeModelIdx);
+
+  // Build a fingerprint of current model state to detect real changes
+  const fingerprint = MODELS.map(m => `${m.name}|${m.model}|${m.ready}`).join(';');
+  if (fingerprint !== _prevModelFingerprint) {
+    _prevModelFingerprint = fingerprint;
+    switchModel(state.activeModelIdx);
+    console.log('[PROBE] Model state changed, UI refreshed');
+  }
 }
 
 /**

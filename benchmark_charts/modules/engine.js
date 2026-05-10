@@ -47,6 +47,7 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
   specRef.toolLog = toolLog;
   specRef.analysis = '⏳ Starting agentic analysis...';
 
+  // Only push the initial empty state to the panel if this spec is actively being viewed
   if (isCurrentView(tickerIdx, tfConfig.id)) {
     const activeSpec = tfd.prevSpecs[state.activeStratIdx];
     if (activeSpec === specRef) {
@@ -84,6 +85,9 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
           }
         }
       }
+
+      // 🛑 Abort stream immediately if a tool call is fully typed out to prevent doom loops
+      if (parseToolCallDirective(content)) return true;
     };
 
     const { content, reasoning } = await singleStreamLLM(messages, onChunk);
@@ -110,6 +114,7 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
       logEntry.status = 'error';
     }
     logEntry.elapsed = Date.now() - startMs;
+    console.log(`[TOOL] ${symbol}/${tfConfig.id} iter${iter}: ${call.tool} → ${logEntry.status} (${logEntry.elapsed}ms). toolLog.length=${toolLog.length}`);
     if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
       updateAgentLogPanel(toolLog);
     }
@@ -238,10 +243,12 @@ async function executeSingleIteration(tickerIdx, t, tfKey, it, macroContext) {
     specRef.toolLog = [];
   }
 
-  // Update carousel to automatically focus on the first newly active iteration
+  // Auto-focus carousel to a running spec so its tool log is visible
   if (isCurrentView(tickerIdx, tfKey)) {
     const idx = tfd.prevSpecs.indexOf(specRef);
-    if (state.activeStratIdx < tfd.prevSpecs.length - 1 && tfd.prevSpecs[state.activeStratIdx].status !== 'running') {
+    const currentSpec = tfd.prevSpecs[state.activeStratIdx];
+    // Auto-switch if current view is not actively running (idle/done/error)
+    if (!currentSpec || currentSpec.status !== 'running') {
       state.activeStratIdx = idx;
       updateStrategyCarousel(t, tfKey);
       showTimeframe(t, tfKey);

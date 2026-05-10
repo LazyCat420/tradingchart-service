@@ -127,7 +127,7 @@ export function updateBottom(t) {
   } else {
     $('analysis-text').textContent = tfd.analysis || tfd.error || t.error || 'No analysis yet.';
   }
-  updateAgentLogPanel(tfd.toolLog || []);
+  updateAgentLogPanel(viewSpec ? (viewSpec.toolLog || []) : (tfd.toolLog || []));
   const stratCount = specs.length;
   $('ov-tag').textContent = stratCount ? stratCount + ' strat' + (stratCount > 1 ? 's' : '') : '—';
 }
