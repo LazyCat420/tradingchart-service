@@ -4,13 +4,21 @@
  */
 import { CORS_PROXY, TOOL_TIMEOUT_MS, TOOL_MAX_RESULT_CHARS } from './config.js';
 import { loadMemory } from './memory.js';
+import { lookupStrategy, suggestStrategy } from './strategy_kb.js';
 
 // ── Individual Tool Implementations ──
 
 async function searchWikipedia(params) {
   const q = (params || '').trim();
   if (!q) return 'Error: empty query';
-  const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q)}`;
+
+  // Domain keyword enrichment — append finance context to trading queries
+  const financeTerms = ['trading', 'finance', 'market', 'stock', 'indicator', 'technical analysis'];
+  const hasFinanceContext = financeTerms.some(t => q.toLowerCase().includes(t));
+  const enrichedQuery = hasFinanceContext ? q : `${q} trading finance`;
+
+  // Use CirrusSearch full-text API (fuzzy matching) instead of exact-title REST API
+  const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(enrichedQuery)}&srwhat=text&srlimit=3&format=json&origin=*`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TOOL_TIMEOUT_MS);
   try {
@@ -18,9 +26,15 @@ async function searchWikipedia(params) {
     try { res = await fetch(url, { signal: ctrl.signal }); }
     catch { res = await fetch(CORS_PROXY + encodeURIComponent(url), { signal: ctrl.signal }); }
     clearTimeout(t);
-    if (!res.ok) return `Wikipedia: no article found for "${q}"`;
+    if (!res.ok) return `Wikipedia search failed for "${q}"`;
     const j = await res.json();
-    return `Wikipedia — ${j.title}:\n${j.extract || 'No summary available.'}`;
+    const results = j?.query?.search || [];
+    if (!results.length) return `Wikipedia: no results for "${q}" (searched: "${enrichedQuery}")`;
+    return results.map((r, i) => {
+      // Strip HTML tags from snippet
+      const snippet = (r.snippet || '').replace(/<[^>]+>/g, '').trim();
+      return `[${i + 1}] ${r.title}:\n   ${snippet}`;
+    }).join('\n\n');
   } catch (e) { clearTimeout(t); return `Wikipedia error: ${e.message}`; }
 }
 
@@ -381,10 +395,134 @@ function getMemoryTool(symbol) {
   return out;
 }
 
+// ── Volume Flow Indicator (LazyBear) ──
+
+function calcVFI(data) {
+  if (!data || data.length < 30) return 'Not enough data for VFI(130)';
+  const period = Math.min(130, data.length - 1);
+  const coef = 0.2;
+  const vcoef = 2.5;
+
+  // Calculate typical price and inter-bar changes
+  const tp = data.map(d => (d.high + d.low + d.close) / 3);
+  const inter = [];
+  for (let i = 1; i < data.length; i++) {
+    inter.push(Math.log(tp[i]) - Math.log(tp[i - 1]));
+  }
+
+  // Standard deviation of log changes for cutoff
+  const slice = inter.slice(-period);
+  const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const std = Math.sqrt(slice.reduce((a, b) => a + (b - mean) ** 2, 0) / slice.length);
+  const cutoff = coef * std;
+
+  // Volume average for capping
+  const vols = data.slice(-period).map(d => d.volume);
+  const avgVol = vols.reduce((a, b) => a + b, 0) / vols.length;
+  const maxVol = avgVol * vcoef;
+
+  // Calculate VFI
+  let vfi = 0;
+  const startIdx = Math.max(1, data.length - period);
+  for (let i = startIdx; i < data.length; i++) {
+    const change = Math.log(tp[i]) - Math.log(tp[i - 1]);
+    const cappedVol = Math.min(data[i].volume, maxVol);
+    if (change > cutoff) vfi += cappedVol;
+    else if (change < -cutoff) vfi -= cappedVol;
+  }
+
+  // Normalize to percentage of total volume
+  const totalVol = vols.reduce((a, b) => a + b, 0);
+  const vfiPct = +((vfi / totalVol) * 100).toFixed(2);
+
+  let signal = 'Neutral';
+  if (vfiPct > 10) signal = 'STRONG ACCUMULATION (Institutional buying pressure)';
+  else if (vfiPct > 0) signal = 'Mild accumulation';
+  else if (vfiPct < -10) signal = 'STRONG DISTRIBUTION (Institutional selling pressure)';
+  else if (vfiPct < 0) signal = 'Mild distribution';
+
+  // Check for divergence
+  const priceDir = data[data.length - 1].close > data[startIdx].close ? 'rising' : 'falling';
+  const vfiDir = vfiPct > 0 ? 'positive' : 'negative';
+  const divergence = (priceDir === 'rising' && vfiPct < 0) ? '⚠ BEARISH DIVERGENCE: Price rising but volume distributing!'
+    : (priceDir === 'falling' && vfiPct > 0) ? '⚠ BULLISH DIVERGENCE: Price falling but volume accumulating!'
+    : 'No divergence';
+
+  return `VFI(${period}): ${vfiPct}% — ${signal}\n  Price: ${priceDir} | VFI: ${vfiDir}\n  ${divergence}`;
+}
+
+// ── Custom Chain Storage (localStorage persistence) ──
+
+function loadCustomChains() {
+  try { return JSON.parse(localStorage.getItem('aql_custom_chains') || '[]'); }
+  catch { return []; }
+}
+
+function saveCustomChain(chain) {
+  const chains = loadCustomChains();
+  // Deduplicate by tool combo hash
+  const hash = chain.tools.slice().sort().join('+');
+  const existing = chains.findIndex(c => c.hash === hash);
+  if (existing >= 0) {
+    chains[existing].uses = (chains[existing].uses || 0) + 1;
+    chains[existing].lastUsed = new Date().toISOString();
+  } else {
+    chains.push({ ...chain, hash, uses: 1, created: new Date().toISOString(), lastUsed: new Date().toISOString(), scores: [] });
+  }
+  // Keep max 50 custom chains
+  if (chains.length > 50) chains.splice(0, chains.length - 50);
+  try { localStorage.setItem('aql_custom_chains', JSON.stringify(chains)); } catch { /* quota */ }
+}
+
+function getBestChains(symbol) {
+  const mem = loadMemory();
+  const entries = mem[symbol]?.entries || [];
+  const scored = entries.filter(e => e.forward_score != null && e.tool_chain_hash);
+
+  if (!scored.length) {
+    // Fall back to custom chains
+    const custom = loadCustomChains();
+    if (!custom.length) return `No chain performance data yet for ${symbol}. Run analyses and score them to build the chain leaderboard.`;
+    return `No scored chains for ${symbol} yet. ${custom.length} custom chains available globally.\n` +
+      custom.slice(-5).map(c => `  • ${c.name} [${c.tools.join(', ')}] (${c.uses} uses)`).join('\n');
+  }
+
+  // Aggregate by chain hash
+  const byHash = {};
+  for (const e of scored) {
+    if (!byHash[e.tool_chain_hash]) byHash[e.tool_chain_hash] = { name: e.tool_chain_name || e.tool_chain_hash, scores: [], tools: e.tools_used || [] };
+    byHash[e.tool_chain_hash].scores.push(e.forward_score);
+  }
+
+  const ranked = Object.values(byHash).map(h => ({
+    ...h,
+    avg: h.scores.reduce((a, b) => a + b, 0) / h.scores.length,
+    count: h.scores.length,
+  })).sort((a, b) => b.avg - a.avg);
+
+  let out = `Chain Performance for ${symbol} (${scored.length} scored strategies):\n\n`;
+  out += '— TOP PERFORMERS —\n';
+  ranked.slice(0, 5).forEach((r, i) => {
+    out += `${i + 1}. ${r.name} (avg: ${r.avg.toFixed(2)}, ${r.count} uses) [${r.tools.join(', ')}]\n`;
+  });
+
+  const worst = ranked.filter(r => r.avg < 0.4);
+  if (worst.length) {
+    out += '\n— AVOID (low scores) —\n';
+    worst.slice(0, 3).forEach(r => {
+      out += `  ✗ ${r.name} (avg: ${r.avg.toFixed(2)}) — underperformed\n`;
+    });
+  }
+
+  return out;
+}
+
 // ── Tool Registry ──
 export const TOOL_REGISTRY = {
-  SEARCH_WIKIPEDIA: { desc: 'Search Wikipedia for a quant concept.', icon: '🔍', execute: (p) => searchWikipedia(p) },
+  SEARCH_WIKIPEDIA: { desc: 'Search Wikipedia for a quant/finance concept (fuzzy full-text search).', icon: '🔍', execute: (p) => searchWikipedia(p) },
   SEARCH_ARXIV:     { desc: 'Search ArXiv for research papers.',     icon: '📄', execute: (p) => searchArxiv(p) },
+  STRATEGY_LOOKUP:  { desc: 'Search the local strategy KB for a trading concept (order blocks, squeeze, ICT, etc).', icon: '📚', execute: (p) => lookupStrategy(p) },
+  SUGGEST_STRATEGY: { desc: 'Get strategy recipe suggestions based on market conditions.', icon: '💡', execute: (p) => suggestStrategy(p) },
   CALC_RSI:         { desc: 'Calculate RSI(14).',                    icon: '📊', execute: (p, d) => calcRSI(d) },
   CALC_ZSCORE:      { desc: 'Calculate Z-Score vs N-period mean.',   icon: '📈', execute: (p, d) => calcZScore(d) },
   CALC_BOLLINGER:   { desc: 'Calculate Bollinger Bands (20,2σ).',    icon: '📉', execute: (p, d) => calcBollinger(d) },
@@ -395,7 +533,9 @@ export const TOOL_REGISTRY = {
   CALC_MACD_LEADER: { desc: 'Calculate MACD Leader (Zero-lag).',     icon: '⚡', execute: (p, d) => calcMACDLeader(d) },
   CALC_SQUEEZE_MOMENTUM: { desc: 'Calculate Squeeze Momentum.',      icon: '🗜️', execute: (p, d) => calcSqueezeMomentum(d) },
   CALC_VWAP:        { desc: 'Calculate Volume Weighted Avg Price.',  icon: '⚖️', execute: (p, d) => calcVWAP(d) },
+  CALC_VFI:         { desc: 'Calculate Volume Flow Indicator (LazyBear). Detects accumulation/distribution.', icon: '🔊', execute: (p, d) => calcVFI(d) },
   GET_MEMORY:       { desc: 'Retrieve past strategy performance.',   icon: '🧠', execute: (p, d, s) => getMemoryTool(s) },
+  GET_BEST_CHAINS:  { desc: 'Get historically best-performing tool chain combos for a ticker.', icon: '🏆', execute: (p, d, s) => getBestChains(s) },
 };
 
 /**
@@ -424,3 +564,20 @@ export function parseToolCallDirective(text) {
   if (!match) return null;
   return { tool: match[1], params: match[2].trim() };
 }
+
+/**
+ * Parse CREATE_TOOL_CHAIN directive from LLM output text.
+ * Format: CREATE_TOOL_CHAIN: ChainName(TOOL1|TOOL2|TOOL3)
+ * @param {string} text - LLM output text.
+ * @returns {{ name: string, tools: string[] } | null}
+ */
+export function parseToolChainDirective(text) {
+  const match = text.match(/CREATE_TOOL_CHAIN(?:[:：])?\s*([^(\uff08]+)[(\uff08]([^)\uff09]+)[)\uff09]/);
+  if (!match) return null;
+  const name = match[1].trim().replace(/\*+/g, '').replace(/`/g, '');
+  const tools = match[2].split('|').map(t => t.trim().toUpperCase()).filter(Boolean);
+  if (!tools.length) return null;
+  return { name, tools };
+}
+
+export { saveCustomChain };

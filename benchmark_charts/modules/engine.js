@@ -14,7 +14,8 @@ import { TIMEFRAMES, TF_ORDER, STRATEGY_LENSES, MAX_TOOL_ROUNDS, MAX_RETRIES_PER
 import { state, initTickerTF, createTicker, saveState, saveTickerData, isCurrentView, getMODEL } from './state.js';
 import { fetchData, singleStreamLLM } from './api.js';
 import { AGENTIC_SYSTEM_PROMPT, buildPrompt } from './prompt.js';
-import { executeToolCall, parseToolCallDirective, TOOL_REGISTRY } from './tools.js';
+import { executeToolCall, parseToolCallDirective, parseToolChainDirective, TOOL_REGISTRY, saveCustomChain } from './tools.js';
+import { lookupStrategy } from './strategy_kb.js';
 import { parseResponse, tryParsePartial } from './json-utils.js';
 import { addMemoryEntry } from './memory.js';
 import { renderChart, renderEmptyChart } from './chart.js';
@@ -39,6 +40,65 @@ import {
  * @param {string} macroContext - Higher-timeframe context.
  * @returns {Promise<{ spec: object, reasoning: string }>}
  */
+/**
+ * Pre-execute a lens's tool chain and return formatted results.
+ * Handles special STRATEGY_LOOKUP:param syntax for parameterized tools.
+ */
+async function preExecuteToolChain(toolChain, data, symbol, toolLog, tickerIdx, tfConfig, specRef) {
+  if (!toolChain || !toolChain.length) return '';
+  const tfd = state.tickers[tickerIdx].tf[tfConfig.id];
+
+  specRef.analysis = `⚙️ Pre-executing ${toolChain.length} tools for lens...`;
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    $('analysis-text').textContent = specRef.analysis;
+  }
+
+  const results = [];
+  const promises = toolChain.map(async (toolSpec) => {
+    // Handle parameterized tools like STRATEGY_LOOKUP:order_block
+    let toolName, toolParams = '';
+    if (toolSpec.includes(':')) {
+      const [name, ...paramParts] = toolSpec.split(':');
+      toolName = name;
+      toolParams = paramParts.join(':');
+    } else {
+      toolName = toolSpec;
+    }
+
+    const logEntry = { round: -1, tool: toolName, params: toolParams || '(auto)', status: 'calling', result: '', elapsed: 0, isPreComputed: true };
+    toolLog.push(logEntry);
+
+    const startMs = Date.now();
+    try {
+      // Special handling for STRATEGY_LOOKUP — use direct function for parameterized calls
+      if (toolName === 'STRATEGY_LOOKUP' && toolParams) {
+        logEntry.result = lookupStrategy(toolParams);
+      } else {
+        logEntry.result = await executeToolCall(toolName, toolParams, data, symbol);
+      }
+      logEntry.status = 'done';
+    } catch (e) {
+      logEntry.result = 'Error: ' + e.message;
+      logEntry.status = 'error';
+    }
+    logEntry.elapsed = Date.now() - startMs;
+    console.log(`[PRE-EXEC] ${symbol}/${tfConfig.id}: ${toolName}(${toolParams}) → ${logEntry.status} (${logEntry.elapsed}ms)`);
+    return { toolName, params: toolParams, result: logEntry.result };
+  });
+
+  const settled = await Promise.allSettled(promises);
+  for (const s of settled) {
+    if (s.status === 'fulfilled') results.push(s.value);
+  }
+
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    updateAgentLogPanel(toolLog);
+  }
+
+  // Format results for prompt injection
+  return results.map(r => `[${r.toolName}${r.params ? '(' + r.params + ')' : ''}]:\n${r.result}`).join('\n\n') + '\n';
+}
+
 async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, macroContext, specRef) {
   const t = state.tickers[tickerIdx];
   const tfd = t.tf[tfConfig.id];
@@ -56,9 +116,15 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
     }
   }
 
+  // Auto-execute lens tool chain BEFORE LLM streaming
+  const lens = STRATEGY_LENSES[(iter - 1) % STRATEGY_LENSES.length];
+  const preComputedResults = await preExecuteToolChain(
+    lens.toolChain, data, symbol, toolLog, tickerIdx, tfConfig, specRef
+  );
+
   const messages = [
     { role: 'system', content: AGENTIC_SYSTEM_PROMPT },
-    { role: 'user', content: buildPrompt(symbol, data, iter, prev, tfConfig, macroContext) },
+    { role: 'user', content: buildPrompt(symbol, data, iter, prev, tfConfig, macroContext, preComputedResults) },
   ];
 
   let lastContent = '';
@@ -86,15 +152,70 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
         }
       }
 
-      // 🛑 Abort stream immediately if a tool call is fully typed out to prevent doom loops
+      // 🛑 Abort stream immediately if a tool call or chain directive is fully typed out
       if (parseToolCallDirective(content) || (reasoning && parseToolCallDirective(reasoning))) return true;
+      if (parseToolChainDirective(content) || (reasoning && parseToolChainDirective(reasoning))) return true;
     };
 
     const { content, reasoning } = await singleStreamLLM(messages, onChunk);
     lastContent = content;
     lastReasoning = reasoning;
 
-    // Check for tool call
+    // Check for CREATE_TOOL_CHAIN directive first (custom multi-tool combo)
+    let chainCall = parseToolChainDirective(content);
+    if (!chainCall && reasoning) chainCall = parseToolChainDirective(reasoning);
+    if (chainCall) {
+      console.log(`[CHAIN] ${symbol}/${tfConfig.id} iter${iter}: LLM created chain "${chainCall.name}" with [${chainCall.tools.join(', ')}]`);
+      specRef.analysis = `⚡ Executing custom chain: ${chainCall.name} (${chainCall.tools.length} tools)...`;
+      if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+        $('analysis-text').textContent = specRef.analysis;
+      }
+
+      // Execute all tools in the chain in parallel
+      const chainResults = [];
+      const chainPromises = chainCall.tools.map(async (toolName) => {
+        const logEntry = { round, tool: toolName, params: '(chain)', status: 'calling', result: '', elapsed: 0, chainName: chainCall.name };
+        toolLog.push(logEntry);
+        const startMs = Date.now();
+        try {
+          logEntry.result = await executeToolCall(toolName, '', data, symbol);
+          logEntry.status = 'done';
+        } catch (e) {
+          logEntry.result = 'Error: ' + e.message;
+          logEntry.status = 'error';
+        }
+        logEntry.elapsed = Date.now() - startMs;
+        return { tool: toolName, result: logEntry.result };
+      });
+
+      const settled = await Promise.allSettled(chainPromises);
+      for (const s of settled) {
+        if (s.status === 'fulfilled') chainResults.push(s.value);
+      }
+
+      // Save custom chain to persistent storage
+      saveCustomChain({ name: chainCall.name, tools: chainCall.tools });
+      specRef.toolChainName = chainCall.name;
+      specRef.toolChainHash = chainCall.tools.slice().sort().join('+');
+
+      console.log(`[CHAIN] ${symbol}/${tfConfig.id}: chain "${chainCall.name}" complete. ${chainResults.length}/${chainCall.tools.length} succeeded.`);
+      if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+        updateAgentLogPanel(toolLog);
+      }
+
+      // Inject combined chain results
+      const combinedResult = chainResults.map(r => `[${r.tool}]:\n${r.result}`).join('\n\n');
+      messages.push({ role: 'assistant', content });
+      messages.push({ role: 'user', content: `TOOL_CHAIN_RESULT for "${chainCall.name}" (${chainCall.tools.join(', ')}):\n${combinedResult}\n\nContinue your analysis. Call another tool, create another chain, or output your final JSON.` });
+
+      specRef.analysis = `🔄 Round ${round + 2}/${MAX_TOOL_ROUNDS} — chain "${chainCall.name}" complete...`;
+      if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+        $('analysis-text').textContent = specRef.analysis;
+      }
+      continue;
+    }
+
+    // Check for single tool call
     let call = parseToolCallDirective(content);
     if (!call && reasoning) call = parseToolCallDirective(reasoning);
     if (!call) break; // No tool call — this is the final answer
@@ -122,7 +243,7 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
 
     // Inject tool result back into conversation
     messages.push({ role: 'assistant', content });
-    messages.push({ role: 'user', content: `TOOL_RESULT for ${call.tool}:\n${logEntry.result}\n\nContinue your analysis. Call another tool or output your final JSON.` });
+    messages.push({ role: 'user', content: `TOOL_RESULT for ${call.tool}:\n${logEntry.result}\n\nContinue your analysis. Call another tool, create a custom chain, or output your final JSON.` });
 
     specRef.analysis = `🔄 Round ${round + 2}/${MAX_TOOL_ROUNDS} — ${toolLog.length} tool(s) called...`;
     if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
@@ -157,6 +278,11 @@ function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning, specRef) {
   tfd.confidence = spec.confidence || 0;
   tfd.iterations = iter;
 
+  // Build tool chain metadata
+  const toolsUsed = spec.tools_used || (specRef.toolLog || []).map(tl => tl.tool);
+  const chainName = specRef.toolChainName || spec.tool_chain_name || lens.name + ' (auto)';
+  const chainHash = specRef.toolChainHash || toolsUsed.slice().sort().join('+');
+
   specRef.status = 'success';
   specRef.strategy_name = tfd.strategy_name;
   specRef.confidence = tfd.confidence;
@@ -166,7 +292,9 @@ function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning, specRef) {
   specRef.created_at = new Date().toISOString();
   specRef.snapshot_close = tfd.data[tfd.data.length - 1]?.close || 0;
   specRef.snapshot_date = tfd.data[tfd.data.length - 1]?.date || '';
-  specRef.tools_used = spec.tools_used || (specRef.toolLog || []).map(tl => tl.tool);
+  specRef.tools_used = toolsUsed;
+  specRef.tool_chain_name = chainName;
+  specRef.tool_chain_hash = chainHash;
   specRef.forward_result = null;
 
   addMemoryEntry(t.symbol, {
@@ -177,7 +305,9 @@ function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning, specRef) {
     confidence: tfd.confidence,
     lens: lens.id,
     overlays_count: (spec.overlays || []).length,
-    tools_used: spec.tools_used || (tfd.toolLog || []).map(tl => tl.tool),
+    tools_used: toolsUsed,
+    tool_chain_name: chainName,
+    tool_chain_hash: chainHash,
     prediction: spec.prediction || null,
     analysis_summary: tfd.analysis.slice(0, 200),
     model: getMODEL(),
