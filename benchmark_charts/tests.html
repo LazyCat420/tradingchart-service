@@ -423,6 +423,147 @@ section('localStorage');
   _localStorage.setItem('aql_model_idx', '0');
 })();
 
+// ══════════════════════════════════════════
+// PLAN PARSER TESTS
+// ══════════════════════════════════════════
+section('parsePlanResponse');
+
+// Mock TOOL_REGISTRY for tests
+const MOCK_TOOL_REGISTRY = {
+  CALC_RSI: true, CALC_ATR: true, CALC_BOLLINGER: true, CALC_ZSCORE: true,
+  CALC_FIBONACCI: true, CALC_MACD: true, CALC_WAVETREND: true, CALC_VFI: true,
+  CALC_VWAP: true, CALC_SQUEEZE_MOMENTUM: true, CALC_MACD_LEADER: true,
+  SEARCH_WIKIPEDIA: true, SEARCH_ARXIV: true, STRATEGY_LOOKUP: true,
+  SUGGEST_STRATEGY: true, GET_MEMORY: true, GET_BEST_CHAINS: true,
+  RESEARCH_SYMBOL: true,
+};
+const PLANNER_MAX_TOOLS = 8;
+
+function parsePlanResponse(content, reasoning, symbol) {
+  // Reuse existing parse infrastructure
+  let c = content.replace(/```json/g,'').replace(/```/g,'').trim();
+  if (c.includes('</think>')) c = c.slice(c.indexOf('</think>')+8).trim();
+  const si=c.indexOf('{'), ei=c.lastIndexOf('}')+1;
+  if (si===-1||ei<=si) throw new Error('No JSON in plan response');
+  let jsonStr = c.slice(si,ei);
+
+  // Try parse with repair
+  let raw;
+  try { raw = JSON.parse(jsonStr); } catch(e1) {
+    const repaired = repairJSON(jsonStr);
+    try { raw = JSON.parse(repaired); } catch(e2) {
+      const closed = tryCloseTruncated(repaired);
+      raw = JSON.parse(closed);
+    }
+  }
+
+  let plan = Array.isArray(raw.plan) ? raw.plan : [];
+  plan = plan.filter(step => {
+    if (!step || !step.tool) return false;
+    const name = String(step.tool).toUpperCase().trim();
+    if (!MOCK_TOOL_REGISTRY[name]) return false;
+    step.tool = name;
+    step.args = String(step.args || '').trim();
+    return true;
+  });
+  if (plan.length > PLANNER_MAX_TOOLS) plan = plan.slice(0, PLANNER_MAX_TOOLS);
+  return { plan, goal: raw.high_level_goal || '', reasoning };
+}
+
+(function() {
+  const content = '{"plan":[{"tool":"CALC_RSI","args":""},{"tool":"CALC_BOLLINGER","args":""}],"high_level_goal":"Test mean reversion"}';
+  const result = parsePlanResponse(content, 'thinking...', 'AAPL');
+  assert(result.plan.length === 2, 'parsePlanResponse: parses 2 tools');
+  assert(result.plan[0].tool === 'CALC_RSI', 'parsePlanResponse: first tool is RSI');
+  assert(result.plan[1].tool === 'CALC_BOLLINGER', 'parsePlanResponse: second tool is BOLLINGER');
+  assert(result.goal === 'Test mean reversion', 'parsePlanResponse: extracts goal');
+  assert(result.reasoning === 'thinking...', 'parsePlanResponse: passes reasoning through');
+})();
+
+(function() {
+  const content = '{"plan":[{"tool":"CALC_RSI","args":""},{"tool":"FAKE_TOOL","args":""},{"tool":"CALC_ATR","args":""}],"high_level_goal":"test"}';
+  const result = parsePlanResponse(content, '', 'AAPL');
+  assert(result.plan.length === 2, 'parsePlanResponse: strips unknown tool', `Got ${result.plan.length}`);
+  assert(result.plan[0].tool === 'CALC_RSI', 'parsePlanResponse: keeps valid RSI');
+  assert(result.plan[1].tool === 'CALC_ATR', 'parsePlanResponse: keeps valid ATR');
+})();
+
+(function() {
+  const content = '{"plan":[],"high_level_goal":"no tools needed"}';
+  const result = parsePlanResponse(content, '', 'AAPL');
+  assert(result.plan.length === 0, 'parsePlanResponse: handles empty plan');
+  assert(result.goal === 'no tools needed', 'parsePlanResponse: goal still extracted');
+})();
+
+(function() {
+  // 10 tools, should be capped at 8
+  const tools = Array(10).fill(null).map((_, i) => `{"tool":"CALC_RSI","args":"${i}"}`);
+  const content = `{"plan":[${tools.join(',')}],"high_level_goal":"big plan"}`;
+  const result = parsePlanResponse(content, '', 'AAPL');
+  assert(result.plan.length === PLANNER_MAX_TOOLS, 'parsePlanResponse: caps at PLANNER_MAX_TOOLS', `Got ${result.plan.length}`);
+})();
+
+(function() {
+  const content = '```json\n{"plan":[{"tool":"RESEARCH_SYMBOL","args":"AAPL earnings"}],"high_level_goal":"macro"}\n```';
+  const result = parsePlanResponse(content, '', 'AAPL');
+  assert(result.plan.length === 1, 'parsePlanResponse: handles fenced JSON');
+  assert(result.plan[0].tool === 'RESEARCH_SYMBOL', 'parsePlanResponse: parses RESEARCH_SYMBOL');
+  assert(result.plan[0].args === 'AAPL earnings', 'parsePlanResponse: preserves args');
+})();
+
+(function() {
+  let threw = false;
+  try { parsePlanResponse('no json here at all', '', 'AAPL'); } catch { threw = true; }
+  assert(threw, 'parsePlanResponse: throws on no JSON');
+})();
+
+(function() {
+  // Case insensitivity
+  const content = '{"plan":[{"tool":"calc_rsi","args":""}],"high_level_goal":"test"}';
+  const result = parsePlanResponse(content, '', 'AAPL');
+  assert(result.plan[0].tool === 'CALC_RSI', 'parsePlanResponse: normalizes to uppercase');
+})();
+
+// ══════════════════════════════════════════
+// PIPELINE MODE TESTS
+// ══════════════════════════════════════════
+section('Pipeline Mode Toggle');
+
+(function() {
+  _localStorage.setItem('aql_pipeline_mode', 'deep');
+  assert(_localStorage.getItem('aql_pipeline_mode') === 'deep', 'Pipeline: deep mode persists');
+  _localStorage.setItem('aql_pipeline_mode', 'quick');
+  assert(_localStorage.getItem('aql_pipeline_mode') === 'quick', 'Pipeline: quick mode persists');
+  _localStorage.setItem('aql_pipeline_mode', 'deep'); // reset
+})();
+
+// ══════════════════════════════════════════
+// TOOLS TRACE SCHEMA TESTS
+// ══════════════════════════════════════════
+section('Tools Trace Schema');
+
+(function() {
+  const trace = [
+    { tool: 'CALC_RSI', args: '', status: 'done', result: 'RSI(14): 68.4', elapsed_ms: 12 },
+    { tool: 'RESEARCH_SYMBOL', args: 'AAPL earnings', status: 'done', result: 'Apple Q1...', elapsed_ms: 1800 },
+    { tool: 'CALC_ATR', args: '', status: 'error', result: 'Error: not enough data', elapsed_ms: 5 },
+  ];
+  assert(trace.length === 3, 'ToolsTrace: 3 entries');
+  assert(trace[0].status === 'done', 'ToolsTrace: first entry done');
+  assert(trace[2].status === 'error', 'ToolsTrace: third entry error');
+  assert(typeof trace[1].elapsed_ms === 'number', 'ToolsTrace: elapsed_ms is number');
+
+  // Simulate synthesizer prompt injection
+  let prompt = '--- TOOL RESULTS ---\n';
+  for (const t of trace) {
+    const icon = t.status === 'done' ? '✓' : '✗';
+    prompt += `[${icon} ${t.tool}]: ${t.result.slice(0, 500)}\n`;
+  }
+  assert(prompt.includes('RSI(14): 68.4'), 'ToolsTrace: RSI result injected into prompt');
+  assert(prompt.includes('Apple Q1'), 'ToolsTrace: Research result injected');
+  assert(prompt.includes('Error:'), 'ToolsTrace: Error result injected');
+})();
+
 summary();
 </script>
 </body></html>

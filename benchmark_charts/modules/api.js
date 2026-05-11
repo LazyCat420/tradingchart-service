@@ -80,7 +80,7 @@ let lastCapacityTime = 0;
 async function getBackendCapacity() {
 	const now = Date.now();
 	if (now - lastCapacityTime < 2000) return lastCapacityResult;
-	
+
 	if (!capacityCheckPromise) {
 		capacityCheckPromise = (async () => {
 			try {
@@ -90,13 +90,13 @@ async function getBackendCapacity() {
 				});
 				if (!res.ok) return true; // Fail open if metrics missing
 				const text = await res.text();
-				
+
 				const waitingMatch = text.match(/vllm:num_requests_waiting(?:\{.*?\})?\s+([0-9.]+)/);
 				const kvMatch = text.match(/vllm:gpu_kv_cache_usage(?:\{.*?\})?\s+([0-9.]+)/);
-				
+
 				const waiting = waitingMatch ? parseFloat(waitingMatch[1]) : 0;
 				const kvUsage = kvMatch ? parseFloat(kvMatch[1]) : 0;
-				
+
 				// Block if backend is internally queuing
 				return (waiting === 0);
 			} catch {
@@ -126,7 +126,7 @@ async function pumpQueue() {
 				pumpTimer = setTimeout(pumpQueue, 2000);
 				return;
 			}
-			
+
 			if (requestQueue.length === 0) break;
 
 			activeRequests++;
@@ -208,7 +208,7 @@ async function parseSseStream(reader, resetTimeoutCallback, onChunk) {
 				const delta = JSON.parse(j).choices?.[0]?.delta || {};
 				if (delta.reasoning_content) reasoning += delta.reasoning_content;
 				if (delta.content) content += delta.content;
-				
+
 				if ((delta.content || delta.reasoning_content) && onChunk) {
 					let stop = false;
 					try {

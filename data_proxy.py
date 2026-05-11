@@ -7,9 +7,15 @@ All logic lives in the browser.
 import os, json, http.server, urllib.parse, urllib.request
 import yfinance as yf, pandas as pd
 
+import time as _time
+
 PORT = 3000
 VLLM_ENDPOINT = "http://10.0.0.141:8000/v1/chat/completions"
 STATIC_DIR = "benchmark_charts"
+
+# ── Symbol summary cache (TTL = 5 min) ──
+_summary_cache = {}
+SUMMARY_CACHE_TTL = 300  # seconds
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -60,6 +66,40 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         "volume": int(row["Volume"])
                     })
                 self._json({"symbol": sym, "period": period, "data": records})
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+        elif p.path == "/api/summary":
+            qs = urllib.parse.parse_qs(p.query)
+            sym = qs.get("symbol", ["AAPL"])[0].upper()
+            # Check cache
+            cached = _summary_cache.get(sym)
+            if cached and _time.time() - cached["ts"] < SUMMARY_CACHE_TTL:
+                self._json(cached["data"])
+                return
+            try:
+                info = yf.Ticker(sym).info
+                data = {
+                    "symbol": sym,
+                    "name": info.get("longName") or info.get("shortName") or sym,
+                    "sector": info.get("sector", ""),
+                    "industry": info.get("industry", ""),
+                    "market_cap": info.get("marketCap"),
+                    "pe_ratio": info.get("trailingPE"),
+                    "forward_pe": info.get("forwardPE"),
+                    "52wk_high": info.get("fiftyTwoWeekHigh"),
+                    "52wk_low": info.get("fiftyTwoWeekLow"),
+                    "avg_volume": info.get("averageVolume"),
+                    "dividend_yield": info.get("dividendYield"),
+                    "analyst_target": info.get("targetMeanPrice"),
+                    "earnings_date": None,
+                }
+                # Extract next earnings date if available
+                cal = info.get("earningsTimestamp")
+                if cal:
+                    import datetime
+                    data["earnings_date"] = datetime.datetime.fromtimestamp(cal).strftime("%Y-%m-%d")
+                _summary_cache[sym] = {"data": data, "ts": _time.time()}
+                self._json(data)
             except Exception as e:
                 self._json({"error": str(e)}, 500)
         else:

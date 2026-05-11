@@ -40,6 +40,10 @@
         <div class="model-opt" onclick="switchModel(1); document.getElementById('model-dropdown').classList.remove('open')">🔴 No Model (30)</div>
       </div>
     </div>
+    <div class="mode-toggle">
+      <button class="mode-btn active" id="mode-deep" onclick="setAnalysisMode(true)" title="Planner→Executor→Synthesizer (2 LLM calls, more thorough)">🧠 Deep</button>
+      <button class="mode-btn" id="mode-quick" onclick="setAnalysisMode(false)" title="Single LLM call (faster, less thorough)">⚡ Quick</button>
+    </div>
     <div class="spinner" id="spinner"></div>
     <div class="pills">
       <div class="pill g" id="pill-pass">0 PASS</div>
@@ -126,6 +130,7 @@
     <span>CONCURRENCY: 5</span>
     <span>OVERLAYS: line · zone · void</span>
     <span id="status-msg"></span>
+    <span class="pipeline-mode" id="pipeline-mode">PIPELINE: DEEP</span>
   </div>
 </div>
 

@@ -27,19 +27,31 @@ export function $(id) {
 export function updateAgentLogPanel(toolLog) {
   const el = $('agent-log');
   if (!toolLog || !toolLog.length) {
-    el.innerHTML = '<div class="tool-empty">⚡ Tools: Wikipedia · ArXiv · RSI · Z-Score · Bollinger · ATR · Fibonacci · Memory</div>';
+    el.innerHTML = '<div class="tool-empty">⚡ Tools: Wikipedia · ArXiv · RSI · Z-Score · Bollinger · ATR · Fibonacci · Memory · Research · Price Levels · Expected Move · Probability Cone · Monte Carlo</div>';
     $('tool-count-tag').textContent = '0 CALLS';
     return;
   }
   el.innerHTML = toolLog.map(t => {
-    const cls = t.status === 'calling' ? 'calling' : t.status === 'error' ? 'error' : 'done';
-    const icon = TOOL_REGISTRY[t.tool]?.icon || '🔧';
+    // Determine CSS class based on entry type
+    let cls = t.status === 'calling' ? 'calling' : t.status === 'error' ? 'error' : 'done';
+    if (t.isPlannerMeta) cls += ' planner-meta';
+    else if (t.isSynthMeta) cls += ' synth-meta';
+    else if (t.isPlannerRequested) cls += ' planner-requested';
+
+    // Choose icon
+    let icon;
+    if (t.isPlannerMeta) icon = '🧠';
+    else if (t.isSynthMeta) icon = '🔬';
+    else icon = TOOL_REGISTRY[t.tool]?.icon || '🔧';
+
     const statusText = t.status === 'calling' ? '⏳ Calling...' : t.status === 'error' ? '✗ Error' : `✓ Done (${t.elapsed || 0}ms)`;
     const resultHtml = t.result ? `<div class="tool-result">${t.result.replace(/</g, '&lt;').slice(0, 300)}</div>` : '';
-    return `<div class="tool-entry ${cls}"><div class="tool-name">${icon} ${t.tool}(${(t.params || '').slice(0, 40)})</div><div class="tool-status">${statusText}</div>${resultHtml}</div>`;
+    const preTag = t.isPreComputed ? ' <span style="color:var(--txf);font-size:8px">(lens)</span>' : '';
+    return `<div class="tool-entry ${cls}"><div class="tool-name">${icon} ${t.tool}(${(t.params || '').slice(0, 40)})${preTag}</div><div class="tool-status">${statusText}</div>${resultHtml}</div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
-  $('tool-count-tag').textContent = toolLog.length + ' CALL' + (toolLog.length !== 1 ? 'S' : '');
+  const actualCalls = toolLog.filter(t => !t.isPlannerMeta && !t.isSynthMeta).length;
+  $('tool-count-tag').textContent = actualCalls + ' CALL' + (actualCalls !== 1 ? 'S' : '');
 }
 
 // ── Spinner & Progress Bar ──
@@ -115,13 +127,51 @@ export function updateBottom(t) {
   const viewSpec = specs[state.activeStratIdx];
   if (viewSpec) {
     let text = viewSpec.analysis || '';
+
     if (viewSpec.prediction) {
       const p = viewSpec.prediction;
       text += `\n\n🎯 Prediction: ${p.direction} | Target: $${p.target_price} | Stop: $${p.stop_loss} | Horizon: ${p.horizon_days}d`;
+
+      // Buy/Sell Zones
+      if (p.buy_zone) {
+        text += `\n\n🟢 BUY ZONE: $${p.buy_zone.entry_low} – $${p.buy_zone.entry_high}`;
+        if (p.buy_zone.rationale) text += `\n   ${p.buy_zone.rationale}`;
+      }
+      if (p.sell_zone) {
+        text += `\n🔴 SELL ZONE: $${p.sell_zone.exit_low} – $${p.sell_zone.exit_high}`;
+        if (p.sell_zone.rationale) text += `\n   ${p.sell_zone.rationale}`;
+      }
+
+      // Probability Data
+      if (p.probability) {
+        const prob = p.probability;
+        text += `\n\n📊 Probability Analysis:`;
+        if (prob.target_hit_pct != null) {
+          const tBar = '█'.repeat(Math.round(prob.target_hit_pct / 5)) + '░'.repeat(20 - Math.round(prob.target_hit_pct / 5));
+          text += `\n   Target hit:  ${prob.target_hit_pct}%  ${tBar}`;
+        }
+        if (prob.stop_hit_pct != null) {
+          const sBar = '█'.repeat(Math.round(prob.stop_hit_pct / 5)) + '░'.repeat(20 - Math.round(prob.stop_hit_pct / 5));
+          text += `\n   Stop hit:    ${prob.stop_hit_pct}%  ${sBar}`;
+        }
+        if (prob.risk_reward != null) {
+          text += `\n   Risk/Reward: ${prob.risk_reward}x`;
+        }
+        if (prob.expected_move_1sigma) {
+          text += `\n   1σ (68%): $${prob.expected_move_1sigma[0]} – $${prob.expected_move_1sigma[1]}`;
+        }
+        if (prob.expected_move_2sigma) {
+          text += `\n   2σ (95%): $${prob.expected_move_2sigma[0]} – $${prob.expected_move_2sigma[1]}`;
+        }
+        if (prob.confidence_basis) {
+          text += `\n   Basis: ${prob.confidence_basis}`;
+        }
+      }
     }
+
     if (viewSpec.forward_result) {
       const fr = viewSpec.forward_result;
-      text += `\n📊 Score: ${(fr.score * 100).toFixed(0)}% | Dir: ${fr.direction_correct ? '✓' : '✗'} | Target: ${fr.target_hit ? '✓' : '✗'} | Move: ${fr.actual_move_pct}%`;
+      text += `\n\n📈 Score: ${(fr.score * 100).toFixed(0)}% | Dir: ${fr.direction_correct ? '✓' : '✗'} | Target: ${fr.target_hit ? '✓' : '✗'} | Move: ${fr.actual_move_pct}%`;
     }
     $('analysis-text').textContent = text;
   } else {

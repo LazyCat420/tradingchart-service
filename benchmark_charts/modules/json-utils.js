@@ -2,6 +2,8 @@
  * json-utils.js — JSON repair and parsing utilities.
  * Pure functions. No I/O, no state, no DOM.
  */
+import { PLANNER_MAX_TOOLS } from './config.js';
+import { TOOL_REGISTRY } from './tools.js';
 
 /**
  * Repair common LLM JSON defects (trailing commas, NaN, control chars).
@@ -135,4 +137,41 @@ export function tryParsePartial(content) {
   try { return JSON.parse(tryCloseTruncated(c)); } catch { /* ignore */ }
   try { return JSON.parse(tryCloseTruncated(repairJSON(c))); } catch { /* ignore */ }
   return null;
+}
+
+/**
+ * Parse the planner LLM response into a validated plan.
+ * @param {string} content - LLM content string.
+ * @param {string} reasoning - LLM reasoning string.
+ * @param {string} symbol - Ticker symbol for logging.
+ * @returns {{ plan: Array<{tool: string, args: string}>, goal: string, reasoning: string }}
+ */
+export function parsePlanResponse(content, reasoning, symbol) {
+  const jsonStr = extractJSON(content);
+  const raw = safeJSONParse(jsonStr, symbol);
+
+  // Validate and sanitize the plan
+  let plan = Array.isArray(raw.plan) ? raw.plan : [];
+
+  // Strip invalid tool names
+  plan = plan.filter(step => {
+    if (!step || !step.tool) return false;
+    const name = String(step.tool).toUpperCase().trim();
+    if (!TOOL_REGISTRY[name]) {
+      console.warn(`[${symbol}] Planner requested unknown tool: ${step.tool} — skipping`);
+      return false;
+    }
+    step.tool = name;
+    step.args = String(step.args || '').trim();
+    return true;
+  });
+
+  // Cap at budget
+  if (plan.length > PLANNER_MAX_TOOLS) {
+    console.warn(`[${symbol}] Planner requested ${plan.length} tools, capping at ${PLANNER_MAX_TOOLS}`);
+    plan = plan.slice(0, PLANNER_MAX_TOOLS);
+  }
+
+  const goal = raw.high_level_goal || raw.goal || '';
+  return { plan, goal, reasoning };
 }

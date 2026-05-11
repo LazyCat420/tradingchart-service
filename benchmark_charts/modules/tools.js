@@ -2,7 +2,7 @@
  * tools.js — Tool registry and execution.
  * Each tool is a pure async function that returns a string result.
  */
-import { CORS_PROXY, TOOL_TIMEOUT_MS, TOOL_MAX_RESULT_CHARS } from './config.js';
+import { CORS_PROXY, TOOL_TIMEOUT_MS, TOOL_MAX_RESULT_CHARS, SUMMARY_CACHE_TTL_MS } from './config.js';
 import { loadMemory } from './memory.js';
 import { lookupStrategy, suggestStrategy } from './strategy_kb.js';
 
@@ -517,6 +517,364 @@ function getBestChains(symbol) {
   return out;
 }
 
+// ── RESEARCH_SYMBOL: Composite Research Hub ──
+
+const _summaryCache = new Map();
+
+/**
+ * Fetch fundamental summary from the data proxy's /api/summary endpoint.
+ * Results are cached for SUMMARY_CACHE_TTL_MS to avoid repeated slow calls.
+ * @param {string} symbol - Ticker symbol.
+ * @returns {Promise<string>} Formatted summary string.
+ */
+async function fetchSymbolSummary(symbol) {
+  const cacheKey = symbol.toUpperCase();
+  const cached = _summaryCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < SUMMARY_CACHE_TTL_MS) return cached.result;
+
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), TOOL_TIMEOUT_MS);
+  try {
+    const res = await fetch(`/api/summary?symbol=${encodeURIComponent(symbol)}`, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!res.ok) return `Summary unavailable for ${symbol} (${res.status})`;
+    const j = await res.json();
+    if (j.error) return `Summary error: ${j.error}`;
+    const lines = [
+      `${j.name || symbol} (${j.sector || '?'} / ${j.industry || '?'})`,
+      `Market Cap: $${j.market_cap ? (j.market_cap / 1e9).toFixed(1) + 'B' : '?'}`,
+      `P/E: ${j.pe_ratio || '?'} | Fwd P/E: ${j.forward_pe || '?'}`,
+      `52wk: $${j['52wk_low'] || '?'} – $${j['52wk_high'] || '?'}`,
+      `Avg Volume: ${j.avg_volume ? (j.avg_volume / 1e6).toFixed(1) + 'M' : '?'}`,
+      j.dividend_yield ? `Div Yield: ${(j.dividend_yield * 100).toFixed(2)}%` : null,
+      j.analyst_target ? `Analyst Target: $${j.analyst_target}` : null,
+      j.earnings_date ? `Next Earnings: ${j.earnings_date}` : null,
+    ].filter(Boolean).join('\n  ');
+    const result = `Fundamentals:\n  ${lines}`;
+    _summaryCache.set(cacheKey, { result, ts: Date.now() });
+    return result;
+  } catch (e) { clearTimeout(t); return `Summary fetch error: ${e.message}`; }
+}
+
+/**
+ * Composite research tool: Wikipedia + Yahoo Finance summary.
+ * @param {string} params - Query string (may include symbol context).
+ * @param {Array} data - OHLCV data (unused).
+ * @param {string} symbol - Ticker symbol.
+ * @returns {Promise<string>} Combined research results.
+ */
+async function researchSymbol(params, data, symbol) {
+  const query = (params || '').trim() || `${symbol} stock market analysis`;
+
+  // Run Wikipedia search + Yahoo summary in parallel
+  const [wikiResult, summaryResult] = await Promise.allSettled([
+    searchWikipedia(`${symbol} ${query}`),
+    fetchSymbolSummary(symbol),
+  ]);
+
+  let out = `Research for ${symbol}: "${query}"\n\n`;
+
+  if (summaryResult.status === 'fulfilled') {
+    out += `── Yahoo Finance ──\n${summaryResult.value}\n\n`;
+  }
+
+  if (wikiResult.status === 'fulfilled') {
+    out += `── Wikipedia ──\n${wikiResult.value}\n`;
+  }
+
+  return out;
+}
+
+// ── Price Levels: Pivot Points + Volume Profile ──
+
+function calcPriceLevels(data) {
+  if (!data || data.length < 20) return 'Not enough data for Price Levels';
+  const recent = data.slice(-20);
+  const last = data[data.length - 1];
+  const current = last.close;
+
+  // Classic Floor Pivot Points from recent swing
+  const periodHigh = Math.max(...recent.map(d => d.high));
+  const periodLow = Math.min(...recent.map(d => d.low));
+  const PP = +((periodHigh + periodLow + current) / 3).toFixed(2);
+  const R1 = +(2 * PP - periodLow).toFixed(2);
+  const S1 = +(2 * PP - periodHigh).toFixed(2);
+  const R2 = +(PP + (periodHigh - periodLow)).toFixed(2);
+  const S2 = +(PP - (periodHigh - periodLow)).toFixed(2);
+  const R3 = +(periodHigh + 2 * (PP - periodLow)).toFixed(2);
+  const S3 = +(periodLow - 2 * (periodHigh - PP)).toFixed(2);
+
+  // Volume Profile — bin prices to find POC, VAH, VAL
+  const allPrices = data.map(d => d.close);
+  const priceMin = Math.min(...data.map(d => d.low));
+  const priceMax = Math.max(...data.map(d => d.high));
+  const numBins = 30;
+  const binSize = (priceMax - priceMin) / numBins || 1;
+  const bins = new Array(numBins).fill(0);
+
+  for (const d of data) {
+    const typPrice = (d.high + d.low + d.close) / 3;
+    const binIdx = Math.min(numBins - 1, Math.floor((typPrice - priceMin) / binSize));
+    bins[binIdx] += d.volume;
+  }
+
+  // POC = bin with highest volume
+  let pocIdx = 0;
+  for (let i = 1; i < numBins; i++) {
+    if (bins[i] > bins[pocIdx]) pocIdx = i;
+  }
+  const POC = +(priceMin + (pocIdx + 0.5) * binSize).toFixed(2);
+
+  // Value Area (70% of total volume around POC)
+  const totalVol = bins.reduce((a, b) => a + b, 0);
+  const targetVol = totalVol * 0.7;
+  let vaVol = bins[pocIdx];
+  let vaLow = pocIdx, vaHigh = pocIdx;
+  while (vaVol < targetVol && (vaLow > 0 || vaHigh < numBins - 1)) {
+    const downVol = vaLow > 0 ? bins[vaLow - 1] : 0;
+    const upVol = vaHigh < numBins - 1 ? bins[vaHigh + 1] : 0;
+    if (downVol >= upVol && vaLow > 0) { vaLow--; vaVol += bins[vaLow]; }
+    else if (vaHigh < numBins - 1) { vaHigh++; vaVol += bins[vaHigh]; }
+    else if (vaLow > 0) { vaLow--; vaVol += bins[vaLow]; }
+    else break;
+  }
+  const VAL = +(priceMin + vaLow * binSize).toFixed(2);
+  const VAH = +(priceMin + (vaHigh + 1) * binSize).toFixed(2);
+
+  // Historical bounce rate at S1/R1 (simplified: count times price touched zone and reversed)
+  let s1Bounces = 0, r1Bounces = 0, s1Tests = 0, r1Tests = 0;
+  const tolerance = (periodHigh - periodLow) * 0.02;
+  for (let i = 1; i < data.length; i++) {
+    if (Math.abs(data[i].low - S1) < tolerance * 2) {
+      s1Tests++;
+      if (data[i].close > data[i].open) s1Bounces++;
+    }
+    if (Math.abs(data[i].high - R1) < tolerance * 2) {
+      r1Tests++;
+      if (data[i].close < data[i].open) r1Bounces++;
+    }
+  }
+  const s1BounceRate = s1Tests > 0 ? Math.round((s1Bounces / s1Tests) * 100) : 50;
+  const r1BounceRate = r1Tests > 0 ? Math.round((r1Bounces / r1Tests) * 100) : 50;
+
+  // Determine buy/sell zones with confluence
+  const buyLow = Math.min(S1, VAL);
+  const buyHigh = Math.max(S1, VAL);
+  const sellLow = Math.min(R1, VAH);
+  const sellHigh = Math.max(R1, VAH);
+
+  return `Price Levels (Floor Pivots + Volume Profile):
+  Pivot Point: $${PP}
+  R3: $${R3} | R2: $${R2} | R1: $${R1}
+  S1: $${S1} | S2: $${S2} | S3: $${S3}
+  POC (Volume): $${POC} | VAH: $${VAH} | VAL: $${VAL}
+  Current: $${current.toFixed(2)}
+  BUY ZONE: $${buyLow.toFixed(2)} – $${buyHigh.toFixed(2)} (S1+VAL confluence, ~${s1BounceRate}% hist bounce rate)
+  SELL ZONE: $${sellLow.toFixed(2)} – $${sellHigh.toFixed(2)} (R1+VAH confluence, ~${r1BounceRate}% hist rejection rate)`;
+}
+
+// ── Expected Move: Volatility-Based σ Bands ──
+
+function calcExpectedMove(data) {
+  if (!data || data.length < 25) return 'Not enough data for Expected Move';
+  const closes = data.map(d => d.close);
+  const current = closes[closes.length - 1];
+
+  // Daily log returns
+  const logReturns = [];
+  for (let i = 1; i < closes.length; i++) {
+    logReturns.push(Math.log(closes[i] / closes[i - 1]));
+  }
+
+  // Historical Volatility (20-day lookback)
+  const lookback = Math.min(20, logReturns.length);
+  const recentReturns = logReturns.slice(-lookback);
+  const meanReturn = recentReturns.reduce((a, b) => a + b, 0) / lookback;
+  const variance = recentReturns.reduce((a, r) => a + (r - meanReturn) ** 2, 0) / (lookback - 1);
+  const dailyVol = Math.sqrt(variance);
+  const annualVol = +(dailyVol * Math.sqrt(252) * 100).toFixed(1);
+
+  // HV percentile vs 1-year range of rolling 20-day HV
+  const hvValues = [];
+  for (let i = 20; i < logReturns.length; i++) {
+    const window = logReturns.slice(i - 20, i);
+    const m = window.reduce((a, b) => a + b, 0) / 20;
+    const v = window.reduce((a, r) => a + (r - m) ** 2, 0) / 19;
+    hvValues.push(Math.sqrt(v));
+  }
+  let hvPercentile = 50;
+  if (hvValues.length > 5) {
+    const sorted = [...hvValues].sort((a, b) => a - b);
+    const rank = sorted.findIndex(v => v >= dailyVol);
+    hvPercentile = Math.round((rank / sorted.length) * 100);
+  }
+
+  // Expected Move for each horizon
+  const horizons = [7, 14, 30];
+  const lines = horizons.map(h => {
+    const em = current * dailyVol * Math.sqrt(h);
+    const em1 = +em.toFixed(2);
+    const em2 = +(2 * em).toFixed(2);
+    const em3 = +(3 * em).toFixed(2);
+    const pct = +((em / current) * 100).toFixed(1);
+    return `  ${h}-Day Expected Move: ±$${em1} (±${pct}%)
+    68% range: [$${(current - em1).toFixed(2)} – $${(current + em1).toFixed(2)}]
+    95% range: [$${(current - em2).toFixed(2)} – $${(current + em2).toFixed(2)}]
+    99% range: [$${(current - em3).toFixed(2)} – $${(current + em3).toFixed(2)}]`;
+  });
+
+  return `Expected Move (Volatility-Based σ Bands):
+  Current: $${current.toFixed(2)} | HV(20): ${annualVol}% annualized | HV Percentile: ${hvPercentile}th
+${lines.join('\n')}`;
+}
+
+// ── Probability Cone: Forward Distribution with Skew/Kurtosis ──
+
+function calcProbabilityCone(data) {
+  if (!data || data.length < 30) return 'Not enough data for Probability Cone';
+  const closes = data.map(d => d.close);
+  const current = closes[closes.length - 1];
+
+  // Full-sample log returns
+  const logReturns = [];
+  for (let i = 1; i < closes.length; i++) {
+    logReturns.push(Math.log(closes[i] / closes[i - 1]));
+  }
+  const n = logReturns.length;
+  const mu = logReturns.reduce((a, b) => a + b, 0) / n;
+  const sigma = Math.sqrt(logReturns.reduce((a, r) => a + (r - mu) ** 2, 0) / (n - 1));
+
+  // Skewness
+  const m3 = logReturns.reduce((a, r) => a + ((r - mu) / sigma) ** 3, 0) / n;
+  const skewness = +m3.toFixed(3);
+
+  // Excess Kurtosis
+  const m4 = logReturns.reduce((a, r) => a + ((r - mu) / sigma) ** 4, 0) / n;
+  const kurtosis = +(m4 - 3).toFixed(3);
+
+  // Fat-tail adjustment factor
+  const tailFactor = Math.max(1, 1 + Math.abs(kurtosis) * 0.1);
+
+  // Cumulative Normal CDF approximation (Abramowitz & Stegun)
+  const normalCDF = (x) => {
+    const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+    const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+    const sign = x < 0 ? -1 : 1;
+    const z = Math.abs(x) / Math.sqrt(2);
+    const t = 1 / (1 + p * z);
+    const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-z * z);
+    return 0.5 * (1 + sign * y);
+  };
+
+  // Probability of reaching a price level
+  const pAbovePrice = (target, horizon) => {
+    const driftedMu = mu * horizon;
+    const scaledSigma = sigma * Math.sqrt(horizon) * tailFactor;
+    const z = (Math.log(target / current) - driftedMu) / scaledSigma;
+    return +(1 - normalCDF(z));
+  };
+
+  // Per-horizon projections
+  const horizons = [7, 14, 30];
+  const lines = horizons.map(h => {
+    const expectedPrice = +(current * Math.exp(mu * h)).toFixed(2);
+    const em = sigma * Math.sqrt(h) * tailFactor;
+    const upper1 = +(current * Math.exp(mu * h + em)).toFixed(2);
+    const lower1 = +(current * Math.exp(mu * h - em)).toFixed(2);
+    const upper2 = +(current * Math.exp(mu * h + 2 * em)).toFixed(2);
+    const lower2 = +(current * Math.exp(mu * h - 2 * em)).toFixed(2);
+    const pUp = +(pAbovePrice(current, h) * 100).toFixed(1);
+
+    return `  ${h}-Day Projection:
+    Expected: $${expectedPrice} | P(above current): ${pUp}%
+    1σ (68%): [$${lower1} – $${upper1}]
+    2σ (95%): [$${lower2} – $${upper2}]`;
+  });
+
+  const fatTailWarning = Math.abs(kurtosis) > 1 ? 'YES — widen stops, tails are fatter than normal' : 'NO';
+
+  return `Probability Cone (Forward Distribution):
+  Current: $${current.toFixed(2)} | Daily μ: ${(mu * 100).toFixed(4)}% | Daily σ: ${(sigma * 100).toFixed(3)}%
+  Skewness: ${skewness} (${skewness > 0.3 ? 'right-skewed/bullish tilt' : skewness < -0.3 ? 'left-skewed/bearish tilt' : 'roughly symmetric'})
+  Excess Kurtosis: ${kurtosis} | Fat-tail warning: ${fatTailWarning}
+  Tail adjustment factor: ${tailFactor.toFixed(2)}x
+${lines.join('\n')}`;
+}
+
+// ── Monte Carlo: GBM Price Path Simulation ──
+
+function calcMonteCarlo(data) {
+  if (!data || data.length < 30) return 'Not enough data for Monte Carlo';
+  const closes = data.map(d => d.close);
+  const current = closes[closes.length - 1];
+
+  // Calibrate GBM from historical data
+  const logReturns = [];
+  for (let i = 1; i < closes.length; i++) {
+    logReturns.push(Math.log(closes[i] / closes[i - 1]));
+  }
+  const n = logReturns.length;
+  const mu = logReturns.reduce((a, b) => a + b, 0) / n;
+  const sigma = Math.sqrt(logReturns.reduce((a, r) => a + (r - mu) ** 2, 0) / (n - 1));
+
+  // Seeded PRNG (mulberry32) for reproducible results
+  let seed = 42;
+  for (let i = 0; i < closes.length; i++) seed = (seed + Math.round(closes[i] * 100)) | 0;
+  const prng = () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+
+  // Box-Muller transform for normal random numbers
+  const randNormal = () => {
+    const u1 = prng(), u2 = prng();
+    return Math.sqrt(-2 * Math.log(u1 || 1e-10)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  const numSims = 500;
+  const horizon = 30;
+  const drift = mu - (sigma * sigma) / 2;
+  const terminals = [];
+
+  for (let sim = 0; sim < numSims; sim++) {
+    let price = current;
+    for (let day = 0; day < horizon; day++) {
+      const z = randNormal();
+      price = price * Math.exp(drift + sigma * z);
+    }
+    terminals.push(price);
+  }
+
+  terminals.sort((a, b) => a - b);
+  const pctile = (p) => terminals[Math.floor(p / 100 * (numSims - 1))];
+  const p10 = +pctile(10).toFixed(2);
+  const p25 = +pctile(25).toFixed(2);
+  const p50 = +pctile(50).toFixed(2);
+  const p75 = +pctile(75).toFixed(2);
+  const p90 = +pctile(90).toFixed(2);
+  const mean = +(terminals.reduce((a, b) => a + b, 0) / numSims).toFixed(2);
+
+  // % of paths above/below key levels
+  const pAbove = +(terminals.filter(t => t > current).length / numSims * 100).toFixed(1);
+  const pBelow = +(terminals.filter(t => t < current).length / numSims * 100).toFixed(1);
+
+  // Expected max drawdown and max gain across simulations
+  const maxGain = +((p90 - current) / current * 100).toFixed(1);
+  const maxLoss = +((p10 - current) / current * 100).toFixed(1);
+
+  return `Monte Carlo Simulation (${numSims} paths, ${horizon}-day horizon):
+  Current: $${current.toFixed(2)} | Drift (μ): ${(mu * 100).toFixed(4)}%/day | Vol (σ): ${(sigma * 100).toFixed(3)}%/day
+  Mean Terminal: $${mean} | Median Terminal: $${p50}
+  10th pctile (bearish): $${p10} (${maxLoss}%)
+  25th pctile: $${p25}
+  50th pctile (most likely): $${p50}
+  75th pctile: $${p75}
+  90th pctile (bullish): $${p90} (+${maxGain}%)
+  P(above current): ${pAbove}% | P(below current): ${pBelow}%`;
+}
+
 // ── Tool Registry ──
 export const TOOL_REGISTRY = {
   SEARCH_WIKIPEDIA: { desc: 'Search Wikipedia for a quant/finance concept (fuzzy full-text search).', icon: '🔍', execute: (p) => searchWikipedia(p) },
@@ -534,6 +892,11 @@ export const TOOL_REGISTRY = {
   CALC_SQUEEZE_MOMENTUM: { desc: 'Calculate Squeeze Momentum.',      icon: '🗜️', execute: (p, d) => calcSqueezeMomentum(d) },
   CALC_VWAP:        { desc: 'Calculate Volume Weighted Avg Price.',  icon: '⚖️', execute: (p, d) => calcVWAP(d) },
   CALC_VFI:         { desc: 'Calculate Volume Flow Indicator (LazyBear). Detects accumulation/distribution.', icon: '🔊', execute: (p, d) => calcVFI(d) },
+  CALC_PRICE_LEVELS: { desc: 'Calculate pivot points, volume profile (POC/VAH/VAL), and buy/sell zones.', icon: '🎯', execute: (p, d) => calcPriceLevels(d) },
+  CALC_EXPECTED_MOVE: { desc: 'Calculate volatility-based expected move with σ bands (68%/95%/99%) for 7/14/30 day horizons.', icon: '📐', execute: (p, d) => calcExpectedMove(d) },
+  CALC_PROBABILITY_CONE: { desc: 'Calculate forward probability distribution with skewness, kurtosis, and CDF-based price targets.', icon: '🔮', execute: (p, d) => calcProbabilityCone(d) },
+  CALC_MONTE_CARLO: { desc: 'Run 500-path Monte Carlo GBM simulation for 30-day price distribution with percentile bands.', icon: '🎲', execute: (p, d) => calcMonteCarlo(d) },
+  RESEARCH_SYMBOL:  { desc: 'Research a stock: Yahoo Finance fundamentals + Wikipedia context. Pass a query string.', icon: '🌐', execute: (p, d, s) => researchSymbol(p, d, s) },
   GET_MEMORY:       { desc: 'Retrieve past strategy performance.',   icon: '🧠', execute: (p, d, s) => getMemoryTool(s) },
   GET_BEST_CHAINS:  { desc: 'Get historically best-performing tool chain combos for a ticker.', icon: '🏆', execute: (p, d, s) => getBestChains(s) },
 };

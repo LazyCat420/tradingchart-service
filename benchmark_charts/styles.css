@@ -153,3 +153,19 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--tx);height:
 @keyframes toolFadeIn{from{opacity:0;transform:translateX(-6px)}to{opacity:1;transform:translateX(0)}}
 @keyframes toolPulse{0%,100%{opacity:1}50%{opacity:.6}}
 
+/* ── Quick/Deep Mode Toggle ── */
+.mode-toggle{display:flex;gap:2px;background:var(--s3);border-radius:4px;padding:1px;border:1px solid var(--bd)}
+.mode-btn{background:transparent;border:none;color:var(--txf);padding:3px 10px;border-radius:3px;font-size:9px;font-weight:700;font-family:'JetBrains Mono',monospace;cursor:pointer;transition:all .2s;letter-spacing:.3px}
+.mode-btn:hover{color:var(--txd)}
+.mode-btn.active{background:rgba(88,166,255,.15);color:var(--cy);box-shadow:0 0 8px rgba(88,166,255,.1)}
+
+/* Pipeline mode indicator in status bar */
+.pipeline-mode{color:var(--pu) !important;font-weight:600 !important}
+
+/* Pipeline meta entries in tool log */
+.tool-entry.planner-meta{border-left-color:var(--pu);background:rgba(167,139,250,.06)}
+.tool-entry.planner-meta .tool-name{color:var(--pu)}
+.tool-entry.synth-meta{border-left-color:var(--tl);background:rgba(45,212,191,.06)}
+.tool-entry.synth-meta .tool-name{color:var(--tl)}
+.tool-entry.planner-requested{border-left-color:var(--am);background:rgba(251,191,36,.04)}
+.tool-entry.planner-requested .tool-name::after{content:' (planner)';font-weight:400;color:var(--txf);font-size:8px}

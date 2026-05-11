@@ -3,7 +3,7 @@
  * No logic, no state management, no rendering.
  * Imports modular pieces and connects them to the DOM.
  */
-import { TF_ORDER, MODELS, MODEL_PROBE_INTERVAL_MS } from './modules/config.js';
+import { TF_ORDER, MODELS, MODEL_PROBE_INTERVAL_MS, ENABLE_PLANNER_EXECUTOR, setEnablePlannerExecutor } from './modules/config.js';
 import { state, loadState, clearAllState, deleteTickerState } from './modules/state.js';
 import { initBackground } from './modules/background.js';
 import {
@@ -46,6 +46,15 @@ window.clearAll = function clearAll() {
   document.querySelectorAll('.tf-tab').forEach(b => {
     b.classList.remove('has-data', 'has-error');
   });
+};
+
+window.setAnalysisMode = function setAnalysisMode(deep) {
+  setEnablePlannerExecutor(deep);
+  document.getElementById('mode-deep').classList.toggle('active', deep);
+  document.getElementById('mode-quick').classList.toggle('active', !deep);
+  document.getElementById('pipeline-mode').textContent = 'PIPELINE: ' + (deep ? 'DEEP' : 'QUICK');
+  try { localStorage.setItem('aql_pipeline_mode', deep ? 'deep' : 'quick'); } catch {}
+  console.log(`[MODE] Pipeline mode: ${deep ? 'DEEP (planner→executor→synthesizer)' : 'QUICK (single call)'}`);
 };
 
 window.deleteTicker = function(idx, event) {
@@ -214,5 +223,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Poll every 10s to keep model status accurate
   setInterval(probeAllModels, MODEL_PROBE_INTERVAL_MS);
 
-  console.log('[APP] Agentic Quant Lab initialized — modular architecture');
+  // Restore pipeline mode from localStorage
+  const savedMode = localStorage.getItem('aql_pipeline_mode') || 'deep';
+  const isDeep = savedMode === 'deep';
+  setEnablePlannerExecutor(isDeep);
+  document.getElementById('mode-deep').classList.toggle('active', isDeep);
+  document.getElementById('mode-quick').classList.toggle('active', !isDeep);
+  document.getElementById('pipeline-mode').textContent = 'PIPELINE: ' + (isDeep ? 'DEEP' : 'QUICK');
+
+  console.log('[APP] Agentic Quant Lab initialized — modular architecture (pipeline: ' + savedMode + ')');
 });

@@ -10,13 +10,13 @@
  * 4. `lastErr = iterErr` was never declared → now properly scoped with `let`
  * 5. No `finally` block for cleanup → now guaranteed via try/finally
  */
-import { TIMEFRAMES, TF_ORDER, STRATEGY_LENSES, MAX_TOOL_ROUNDS, MAX_RETRIES_PER_ITER } from './config.js';
+import { TIMEFRAMES, TF_ORDER, STRATEGY_LENSES, MAX_TOOL_ROUNDS, MAX_RETRIES_PER_ITER, ENABLE_PLANNER_EXECUTOR } from './config.js';
 import { state, initTickerTF, createTicker, saveState, saveTickerData, isCurrentView, getMODEL } from './state.js';
 import { fetchData, singleStreamLLM } from './api.js';
-import { AGENTIC_SYSTEM_PROMPT, buildPrompt } from './prompt.js';
+import { AGENTIC_SYSTEM_PROMPT, buildPrompt, PLANNER_SYSTEM_PROMPT, buildPlannerPrompt, SYNTHESIZER_SYSTEM_PROMPT, buildSynthesizerPrompt } from './prompt.js';
 import { executeToolCall, parseToolCallDirective, parseToolChainDirective, TOOL_REGISTRY, saveCustomChain } from './tools.js';
 import { lookupStrategy } from './strategy_kb.js';
-import { parseResponse, tryParsePartial } from './json-utils.js';
+import { parseResponse, tryParsePartial, parsePlanResponse } from './json-utils.js';
 import { addMemoryEntry } from './memory.js';
 import { renderChart, renderEmptyChart } from './chart.js';
 import {
@@ -117,10 +117,12 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
   }
 
   // Auto-execute lens tool chain BEFORE LLM streaming
+  // Skip if toolLog already has pre-computed results (e.g. fallback from agenticPipeline)
   const lens = STRATEGY_LENSES[(iter - 1) % STRATEGY_LENSES.length];
-  const preComputedResults = await preExecuteToolChain(
-    lens.toolChain, data, symbol, toolLog, tickerIdx, tfConfig, specRef
-  );
+  const alreadyPreComputed = toolLog.some(l => l.isPreComputed);
+  const preComputedResults = alreadyPreComputed
+    ? toolLog.filter(l => l.isPreComputed).map(r => `[${r.tool}${r.params ? '(' + r.params + ')' : ''}]:\n${r.result}`).join('\n\n') + '\n'
+    : await preExecuteToolChain(lens.toolChain, data, symbol, toolLog, tickerIdx, tfConfig, specRef);
 
   const messages = [
     { role: 'system', content: AGENTIC_SYSTEM_PROMPT },
@@ -268,6 +270,255 @@ async function agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, mac
   }
 }
 
+// ════════════════════════════════════════════════════════════
+// PLANNER–EXECUTOR–SYNTHESIZER PIPELINE (Deep Mode)
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Phase 1: Ask the LLM to produce a tool execution plan.
+ * Streams the response for UI feedback, then parses the plan JSON.
+ */
+async function askPlanner(tickerIdx, symbol, data, iter, prev, tfConfig, preComputedResults, toolLog, specRef) {
+  const tfd = state.tickers[tickerIdx].tf[tfConfig.id];
+
+  specRef.analysis = '🧠 Planning tool execution...';
+  specRef.pipelinePhase = 'planning';
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    $('analysis-text').textContent = specRef.analysis;
+  }
+
+  const messages = [
+    { role: 'system', content: PLANNER_SYSTEM_PROMPT },
+    { role: 'user', content: buildPlannerPrompt(symbol, data, iter, prev, tfConfig, preComputedResults) },
+  ];
+
+  const onChunk = ({ content }) => {
+    if (!isCurrentView(tickerIdx, tfConfig.id)) return;
+    if (tfd.prevSpecs[state.activeStratIdx] !== specRef) return;
+    specRef.analysis = '🧠 Planning: ' + content.slice(0, 200);
+    $('analysis-text').textContent = specRef.analysis;
+  };
+
+  const { content, reasoning } = await singleStreamLLM(messages, onChunk);
+  console.log(`[PLANNER] ${symbol}/${tfConfig.id} iter${iter}: raw plan = ${content.slice(0, 300)}`);
+
+  const planResult = parsePlanResponse(content, reasoning, symbol);
+
+  // Log the plan
+  const planLogEntry = {
+    round: -2,
+    tool: 'PLANNER',
+    params: planResult.goal,
+    status: 'done',
+    result: `Plan: ${planResult.plan.map(s => s.tool).join(', ')} | Goal: ${planResult.goal}`,
+    elapsed: 0,
+    isPlannerMeta: true,
+  };
+  toolLog.push(planLogEntry);
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    updateAgentLogPanel(toolLog);
+  }
+
+  return planResult;
+}
+
+/**
+ * Phase 2: Execute the planner's requested tools in parallel.
+ * Returns a tools_trace array suitable for injection into the synthesizer.
+ */
+async function executePlannerPlan(plan, data, symbol, toolLog, tickerIdx, tfConfig, specRef) {
+  if (!plan || !plan.length) return [];
+  const tfd = state.tickers[tickerIdx].tf[tfConfig.id];
+
+  specRef.analysis = `⚙️ Executing plan: ${plan.length} tool(s)...`;
+  specRef.pipelinePhase = 'executing';
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    $('analysis-text').textContent = specRef.analysis;
+  }
+
+  const results = [];
+  const promises = plan.map(async (step) => {
+    const logEntry = {
+      round: -1,
+      tool: step.tool,
+      params: step.args || '(auto)',
+      status: 'calling',
+      result: '',
+      elapsed: 0,
+      isPlannerRequested: true,
+    };
+    toolLog.push(logEntry);
+
+    const startMs = Date.now();
+    try {
+      // Use the same dispatch as the existing tool system
+      if (step.tool === 'STRATEGY_LOOKUP' && step.args) {
+        logEntry.result = lookupStrategy(step.args);
+      } else {
+        logEntry.result = await executeToolCall(step.tool, step.args, data, symbol);
+      }
+      logEntry.status = 'done';
+    } catch (e) {
+      logEntry.result = 'Error: ' + e.message;
+      logEntry.status = 'error';
+    }
+    logEntry.elapsed = Date.now() - startMs;
+    console.log(`[PLAN-EXEC] ${symbol}/${tfConfig.id}: ${step.tool}(${step.args}) → ${logEntry.status} (${logEntry.elapsed}ms)`);
+    return {
+      tool: step.tool,
+      args: step.args || '',
+      status: logEntry.status,
+      result: logEntry.result,
+      elapsed_ms: logEntry.elapsed,
+    };
+  });
+
+  const settled = await Promise.allSettled(promises);
+  for (const s of settled) {
+    if (s.status === 'fulfilled') results.push(s.value);
+  }
+
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    updateAgentLogPanel(toolLog);
+  }
+
+  return results;
+}
+
+/**
+ * Phase 3: Ask the LLM to synthesize all tool results into a final overlay spec.
+ * Streams the response for progressive chart rendering.
+ */
+async function askSynthesizer(tickerIdx, symbol, data, toolsTrace, iter, prev, tfConfig, macroContext, toolLog, specRef) {
+  const tfd = state.tickers[tickerIdx].tf[tfConfig.id];
+
+  specRef.analysis = '🔬 Synthesizing analysis from tool results...';
+  specRef.pipelinePhase = 'synthesizing';
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    $('analysis-text').textContent = specRef.analysis;
+  }
+
+  const messages = [
+    { role: 'system', content: SYNTHESIZER_SYSTEM_PROMPT },
+    { role: 'user', content: buildSynthesizerPrompt(symbol, data, toolsTrace, iter, prev, tfConfig, macroContext) },
+  ];
+
+  const onChunk = ({ content }) => {
+    specRef.analysis = content;
+    if (!isCurrentView(tickerIdx, tfConfig.id)) return;
+    if (tfd.prevSpecs[state.activeStratIdx] !== specRef) return;
+
+    $('analysis-text').textContent = content;
+    $('analysis-text').scrollTop = $('analysis-text').scrollHeight;
+
+    // Progressive chart rendering (same pattern as agenticLLMLoop)
+    if (content.endsWith('}') || content.endsWith(']')) {
+      const partial = tryParsePartial(content);
+      if (partial && partial.overlays) {
+        const overlaysStr = JSON.stringify(partial.overlays);
+        if (specRef._lastOverlays !== overlaysStr) {
+          specRef._lastOverlays = overlaysStr;
+          renderChart(tfd.data, partial, symbol, tfConfig.label);
+        }
+      }
+    }
+  };
+
+  const { content, reasoning } = await singleStreamLLM(messages, onChunk);
+
+  // Log synthesizer completion
+  const synthLogEntry = {
+    round: -3,
+    tool: 'SYNTHESIZER',
+    params: '',
+    status: 'done',
+    result: 'Final spec produced.',
+    elapsed: 0,
+    isSynthMeta: true,
+  };
+  toolLog.push(synthLogEntry);
+  if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+    updateAgentLogPanel(toolLog);
+  }
+
+  // Parse and return, with JSON-forcing retry on failure
+  try {
+    return parseResponse(content, reasoning, symbol);
+  } catch (parseErr) {
+    console.warn(`[${symbol}] Synthesizer parse failed: ${parseErr.message}. JSON-forcing retry...`);
+    specRef.analysis = '🔧 Fixing synthesizer output...';
+    if (isCurrentView(tickerIdx, tfConfig.id) && tfd.prevSpecs[state.activeStratIdx] === specRef) {
+      $('analysis-text').textContent = specRef.analysis;
+    }
+    messages.push({ role: 'assistant', content });
+    messages.push({ role: 'user', content: 'Your output was not valid JSON. Output ONLY the raw JSON object. Start with { and end with }.' });
+    const retry = await singleStreamLLM(messages, null);
+    return parseResponse(retry.content, retry.reasoning, symbol);
+  }
+}
+
+/**
+ * Full agentic pipeline: Planner → Executor → Synthesizer.
+ * Falls back to agenticLLMLoop if planner fails or is disabled.
+ */
+async function agenticPipeline(tickerIdx, symbol, data, iter, prev, tfConfig, macroContext, specRef) {
+  const t = state.tickers[tickerIdx];
+  const tfd = t.tf[tfConfig.id];
+  const toolLog = [];
+  specRef.toolLog = toolLog;
+
+  // Phase 0: Pre-execute static lens chain (always, both modes)
+  const lens = STRATEGY_LENSES[(iter - 1) % STRATEGY_LENSES.length];
+  const preComputedResults = await preExecuteToolChain(
+    lens.toolChain, data, symbol, toolLog, tickerIdx, tfConfig, specRef
+  );
+
+  // Convert pre-computed results into trace format for synthesizer
+  const preTrace = toolLog
+    .filter(l => l.isPreComputed)
+    .map(l => ({
+      tool: l.tool,
+      args: l.params || '',
+      status: l.status,
+      result: l.result,
+      elapsed_ms: l.elapsed || 0,
+    }));
+
+  // Quick Mode: use existing single-call path
+  if (!ENABLE_PLANNER_EXECUTOR) {
+    console.log(`[${symbol}/${tfConfig.id}] Quick mode — single LLM call`);
+    return agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, macroContext, specRef);
+  }
+
+  // Deep Mode: Planner → Executor → Synthesizer
+  console.log(`[${symbol}/${tfConfig.id}] Deep mode — planner→executor→synthesizer`);
+  let planResult;
+  try {
+    planResult = await askPlanner(tickerIdx, symbol, data, iter, prev, tfConfig, preComputedResults, toolLog, specRef);
+  } catch (planErr) {
+    console.warn(`[${symbol}] Planner failed: ${planErr.message}. Falling back to Quick mode.`);
+    specRef.analysis = '⚠ Planner failed, using quick mode...';
+    return agenticLLMLoop(tickerIdx, symbol, data, iter, prev, tfConfig, macroContext, specRef);
+  }
+
+  if (!planResult.plan.length) {
+    console.log(`[${symbol}] Planner returned empty plan. Using pre-computed results only.`);
+  }
+
+  // Phase 2: Execute the planner's additional tools
+  const planTrace = await executePlannerPlan(planResult.plan, data, symbol, toolLog, tickerIdx, tfConfig, specRef);
+
+  // Merge all traces: pre-computed + planner-requested
+  const fullTrace = [...preTrace, ...planTrace];
+  specRef.toolsTrace = fullTrace;
+  specRef.plannerGoal = planResult.goal;
+
+  // Phase 3: Synthesize
+  const result = await askSynthesizer(tickerIdx, symbol, data, fullTrace, iter, prev, tfConfig, macroContext, toolLog, specRef);
+  return result;
+}
+
+
 // ── Save one iteration result to ticker state + memory ──
 function saveIterationResult(t, tfd, tfKey, iter, spec, reasoning, specRef) {
   const lens = STRATEGY_LENSES[(iter - 1) % STRATEGY_LENSES.length];
@@ -402,7 +653,7 @@ async function executeSingleIteration(tickerIdx, t, tfKey, it, macroContext) {
         }
       }
 
-      const { spec, reasoning } = await agenticLLMLoop(tickerIdx, t.symbol, tfd.data, it, tfd.prevSpecs, tfConfig, macroContext, specRef);
+      const { spec, reasoning } = await agenticPipeline(tickerIdx, t.symbol, tfd.data, it, tfd.prevSpecs, tfConfig, macroContext, specRef);
       saveIterationResult(t, tfd, tfKey, it, spec, reasoning, specRef);
 
       if (isCurrentView(tickerIdx, tfKey) && tfd.prevSpecs[state.activeStratIdx] === specRef) {

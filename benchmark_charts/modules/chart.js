@@ -18,9 +18,14 @@ export function calcEMA(closes, span) {
  * @param {Array} overlays - Array of overlay objects from LLM spec.
  * @returns {{ shapes: Array, annotations: Array }}
  */
-function buildOverlayShapes(overlays) {
+function buildOverlayShapes(overlays, data) {
   const shapes = [];
   const annotations = [];
+
+  // Get date range for full-width horizontal overlays
+  const dates = data ? data.map(d => d.date) : [];
+  const xStart = dates[0] || '2020-01-01';
+  const xEnd = dates[dates.length - 1] || '2030-01-01';
 
   for (const ov of overlays) {
     if (ov.kind === 'line') {
@@ -46,6 +51,56 @@ function buildOverlayShapes(overlays) {
       annotations.push({
         x: ov.x0, y: ov.y1, text: ov.label || '', showarrow: false,
         font: { color: ov.color || '#fff', size: 9 }, yshift: 10,
+        xref: 'x', yref: 'y',
+      });
+    } else if (ov.kind === 'probability_band') {
+      // σ-band: shaded horizontal region spanning entire chart
+      const sigma = ov.sigma_level || 1;
+      const opacity = sigma === 1 ? 0.12 : sigma === 2 ? 0.06 : 0.03;
+      const color = ov.color || '#9333ea';
+      shapes.push({
+        type: 'rect', x0: xStart, y0: ov.y_lower, x1: xEnd, y1: ov.y_upper,
+        fillcolor: color,
+        opacity,
+        line: { color, width: 1, dash: 'dot' },
+        xref: 'x', yref: 'y',
+      });
+      const pct = ov.probability_pct || (sigma === 1 ? 68 : 95);
+      annotations.push({
+        x: xEnd, y: ov.y_upper, text: `${sigma}σ (${pct}%)`, showarrow: false,
+        font: { color, size: 8 }, xshift: -5, yshift: 8,
+        xref: 'x', yref: 'y',
+      });
+    } else if (ov.kind === 'buy_zone') {
+      // Green horizontal band for entry range
+      shapes.push({
+        type: 'rect', x0: xStart, y0: ov.y_low, x1: xEnd, y1: ov.y_high,
+        fillcolor: '#22c55e',
+        opacity: 0.10,
+        line: { color: '#22c55e', width: 1.5, dash: 'dash' },
+        xref: 'x', yref: 'y',
+      });
+      annotations.push({
+        x: xStart, y: (ov.y_low + ov.y_high) / 2,
+        text: `🟢 ${ov.label || 'BUY ZONE'}`,
+        showarrow: false,
+        font: { color: '#22c55e', size: 9 }, xshift: 8,
+        xref: 'x', yref: 'y',
+      });
+    } else if (ov.kind === 'sell_zone') {
+      // Red horizontal band for exit range
+      shapes.push({
+        type: 'rect', x0: xStart, y0: ov.y_low, x1: xEnd, y1: ov.y_high,
+        fillcolor: '#ef4444',
+        opacity: 0.10,
+        line: { color: '#ef4444', width: 1.5, dash: 'dash' },
+        xref: 'x', yref: 'y',
+      });
+      annotations.push({
+        x: xStart, y: (ov.y_low + ov.y_high) / 2,
+        text: `🔴 ${ov.label || 'SELL ZONE'}`,
+        showarrow: false,
+        font: { color: '#ef4444', size: 9 }, xshift: 8,
         xref: 'x', yref: 'y',
       });
     }
@@ -83,7 +138,7 @@ export function renderChart(data, spec, symbol, tfLabel) {
     { type: 'bar', x: dates, y: data.map(d => d.volume), marker: { color: volumeColors }, name: 'Volume', yaxis: 'y2', opacity: 0.6 },
   ];
 
-  const { shapes, annotations } = buildOverlayShapes(spec.overlays || []);
+  const { shapes, annotations } = buildOverlayShapes(spec.overlays || [], data);
 
   // Build title parts
   const titleParts = [symbol];
