@@ -143,6 +143,215 @@ function calcFibonacci(data) {
   return `Fibonacci Retracement:\n  Swing High: $${swingHigh.toFixed(2)} | Swing Low: $${swingLow.toFixed(2)}\n${lines.join('\n')}\n  Current: $${current.toFixed(2)}`;
 }
 
+function calcWaveTrend(data) {
+  if (!data || data.length < 25) return 'Not enough data for WaveTrend(10,21)';
+  const n1 = 10;
+  const n2 = 21;
+  const hlc3 = data.map(d => (d.high + d.low + d.close) / 3);
+
+  const calcEMA = (src, period) => {
+    const k = 2 / (period + 1);
+    const ema = [src[0]];
+    for (let i = 1; i < src.length; i++) {
+      ema.push(src[i] * k + ema[i - 1] * (1 - k));
+    }
+    return ema;
+  };
+
+  const esa = calcEMA(hlc3, n1);
+  const absDiff = hlc3.map((val, i) => Math.abs(val - esa[i]));
+  const d = calcEMA(absDiff, n1);
+  const ci = hlc3.map((val, i) => d[i] === 0 ? 0 : (val - esa[i]) / (0.015 * d[i]));
+  
+  const wt1 = calcEMA(ci, n2);
+  
+  const wt2 = [];
+  const smaPeriod = 4;
+  for (let i = 0; i < wt1.length; i++) {
+    if (i < smaPeriod - 1) {
+      wt2.push(wt1[i]);
+    } else {
+      let sum = 0;
+      for(let j = 0; j < smaPeriod; j++) sum += wt1[i-j];
+      wt2.push(sum / smaPeriod);
+    }
+  }
+
+  const currentWT1 = +(wt1[wt1.length - 1]).toFixed(2);
+  const currentWT2 = +(wt2[wt2.length - 1]).toFixed(2);
+  
+  let signal = 'Neutral';
+  if (currentWT1 > 60) signal = 'OVERBOUGHT (Wait for WT1 to cross under WT2)';
+  else if (currentWT1 < -60) signal = 'OVERSOLD (Wait for WT1 to cross over WT2)';
+  
+  if (currentWT1 > currentWT2 && wt1[wt1.length-2] <= wt2[wt2.length-2]) {
+    signal += ' | BULLISH CROSSOVER';
+  } else if (currentWT1 < currentWT2 && wt1[wt1.length-2] >= wt2[wt2.length-2]) {
+    signal += ' | BEARISH CROSSOVER';
+  }
+
+  return `WaveTrend(10,21):\n  WT1 (Fast): ${currentWT1}\n  WT2 (Slow): ${currentWT2}\n  Signal: ${signal}`;
+}
+
+function calcMACD(data) {
+  if (!data || data.length < 30) return 'Not enough data for MACD(12,26,9)';
+  const closes = data.map(d => d.close);
+  
+  const calcEMA = (src, period) => {
+    const k = 2 / (period + 1);
+    const ema = [src[0]];
+    for (let i = 1; i < src.length; i++) {
+      ema.push(src[i] * k + ema[i - 1] * (1 - k));
+    }
+    return ema;
+  };
+  
+  const ema12 = calcEMA(closes, 12);
+  const ema26 = calcEMA(closes, 26);
+  const macdLine = ema12.map((val, i) => val - ema26[i]);
+  const signalLine = calcEMA(macdLine, 9);
+  const histogram = macdLine.map((val, i) => val - signalLine[i]);
+  
+  const currentMacd = +(macdLine[macdLine.length - 1]).toFixed(3);
+  const currentSignal = +(signalLine[signalLine.length - 1]).toFixed(3);
+  const currentHist = +(histogram[histogram.length - 1]).toFixed(3);
+  
+  let signal = 'Neutral';
+  if (currentMacd > currentSignal && macdLine[macdLine.length-2] <= signalLine[signalLine.length-2]) {
+    signal = 'BULLISH CROSSOVER';
+  } else if (currentMacd < currentSignal && macdLine[macdLine.length-2] >= signalLine[signalLine.length-2]) {
+    signal = 'BEARISH CROSSOVER';
+  }
+  
+  return `MACD(12,26,9):\n  MACD Line: ${currentMacd}\n  Signal Line: ${currentSignal}\n  Histogram: ${currentHist}\n  Signal: ${signal}`;
+}
+
+function calcMACDLeader(data) {
+  if (!data || data.length < 30) return 'Not enough data for MACD Leader';
+  const closes = data.map(d => d.close);
+  
+  const calcEMA = (src, period) => {
+    const k = 2 / (period + 1);
+    const ema = [src[0]];
+    for (let i = 1; i < src.length; i++) {
+      ema.push(src[i] * k + ema[i - 1] * (1 - k));
+    }
+    return ema;
+  };
+  
+  const shortEma = calcEMA(closes, 12);
+  const longEma = calcEMA(closes, 26);
+  
+  const shortDiff = closes.map((val, i) => val - shortEma[i]);
+  const longDiff = closes.map((val, i) => val - longEma[i]);
+  
+  const emaShortDiff = calcEMA(shortDiff, 12);
+  const emaLongDiff = calcEMA(longDiff, 26);
+  
+  const ind1 = shortEma.map((val, i) => val + emaShortDiff[i]);
+  const ind2 = longEma.map((val, i) => val + emaLongDiff[i]);
+  
+  const leaderLine = ind1.map((val, i) => val - ind2[i]);
+  const signalLine = calcEMA(leaderLine, 9);
+  
+  const currentLeader = +(leaderLine[leaderLine.length - 1]).toFixed(3);
+  const currentSignal = +(signalLine[signalLine.length - 1]).toFixed(3);
+  
+  let signal = 'Neutral';
+  if (currentLeader > currentSignal && leaderLine[leaderLine.length-2] <= signalLine[signalLine.length-2]) {
+    signal = 'BULLISH LEADER CROSSOVER (Zero-Lag Early Signal)';
+  } else if (currentLeader < currentSignal && leaderLine[leaderLine.length-2] >= signalLine[signalLine.length-2]) {
+    signal = 'BEARISH LEADER CROSSOVER (Zero-Lag Early Signal)';
+  }
+  
+  return `MACD Leader (Zero-Lag MACD):\n  Leader Line: ${currentLeader}\n  Signal Line: ${currentSignal}\n  Signal: ${signal}`;
+}
+
+function calcVWAP(data) {
+  if (!data || data.length < 1) return 'Not enough data for VWAP';
+  let cumVol = 0;
+  let cumVolPrice = 0;
+  for (let i = 0; i < data.length; i++) {
+    const d = data[i];
+    const typPrice = (d.high + d.low + d.close) / 3;
+    cumVol += d.volume;
+    cumVolPrice += typPrice * d.volume;
+  }
+  const vwap = +(cumVolPrice / cumVol).toFixed(2);
+  const current = data[data.length - 1].close;
+  
+  let signal = 'Neutral';
+  if (current > vwap) signal = 'BULLISH (Price above VWAP)';
+  else if (current < vwap) signal = 'BEARISH (Price below VWAP)';
+  
+  return `VWAP (entire period): $${vwap}\n  Current Price: $${current}\n  Signal: ${signal}`;
+}
+
+function calcSqueezeMomentum(data) {
+  if (!data || data.length < 40) return 'Not enough data for Squeeze Momentum(20)';
+  
+  const length = 20;
+  const bbMult = 2.0;
+  const kcMult = 1.5;
+  
+  const closes = data.map(d => d.close);
+  const highs = data.map(d => d.high);
+  const lows = data.map(d => d.low);
+  
+  const trs = [highs[0] - lows[0]];
+  for (let i = 1; i < data.length; i++) {
+    const hl = highs[i] - lows[i];
+    const hpc = Math.abs(highs[i] - closes[i - 1]);
+    const lpc = Math.abs(lows[i] - closes[i - 1]);
+    trs.push(Math.max(hl, hpc, lpc));
+  }
+  
+  const sliceCloses = closes.slice(-length);
+  const sliceTrs = trs.slice(-length);
+  
+  const sma = sliceCloses.reduce((a, b) => a + b, 0) / length;
+  const std = Math.sqrt(sliceCloses.reduce((a, b) => a + (b - sma) ** 2, 0) / length);
+  
+  const bbUpper = sma + bbMult * std;
+  const bbLower = sma - bbMult * std;
+  
+  const smaTr = sliceTrs.reduce((a, b) => a + b, 0) / length;
+  const kcUpper = sma + kcMult * smaTr;
+  const kcLower = sma - kcMult * smaTr;
+  
+  const squeezeOn = bbLower > kcLower && bbUpper < kcUpper;
+  
+  const deltas = [];
+  for (let i = data.length - length; i < data.length; i++) {
+    const winHighs = highs.slice(i - length + 1, i + 1);
+    const winLows = lows.slice(i - length + 1, i + 1);
+    const winCloses = closes.slice(i - length + 1, i + 1);
+    
+    const highestHigh = Math.max(...winHighs);
+    const lowestLow = Math.min(...winLows);
+    const winSma = winCloses.reduce((a, b) => a + b, 0) / length;
+    
+    const avgVal = ((highestHigh + lowestLow) / 2 + winSma) / 2;
+    deltas.push(closes[i] - avgVal);
+  }
+  
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (let i = 0; i < length; i++) {
+    sumX += i;
+    sumY += deltas[i];
+    sumXY += i * deltas[i];
+    sumX2 += i * i;
+  }
+  const m = (length * sumXY - sumX * sumY) / (length * sumX2 - sumX * sumX);
+  const b = (sumY - m * sumX) / length;
+  const momentum = +(m * (length - 1) + b).toFixed(4);
+  
+  let state = squeezeOn ? "SQUEEZE ON (Consolidating, preparing to break out)" : "SQUEEZE OFF (Momentum Released / Active Trend)";
+  let dir = momentum > 0 ? "BULLISH Momentum" : "BEARISH Momentum";
+  
+  return `Squeeze Momentum (20, BB:2.0, KC:1.5):\n  Squeeze State: ${state}\n  Momentum Histogram: ${momentum} (${dir})`;
+}
+
 function getMemoryTool(symbol) {
   const mem = loadMemory();
   const entries = mem[symbol]?.entries || [];
@@ -181,6 +390,11 @@ export const TOOL_REGISTRY = {
   CALC_BOLLINGER:   { desc: 'Calculate Bollinger Bands (20,2σ).',    icon: '📉', execute: (p, d) => calcBollinger(d) },
   CALC_ATR:         { desc: 'Calculate ATR(14).',                    icon: '⚡', execute: (p, d) => calcATR(d) },
   CALC_FIBONACCI:   { desc: 'Calculate Fibonacci retracement.',      icon: '🔢', execute: (p, d) => calcFibonacci(d) },
+  CALC_WAVETREND:   { desc: 'Calculate WaveTrend Oscillator (10,21).', icon: '🌊', execute: (p, d) => calcWaveTrend(d) },
+  CALC_MACD:        { desc: 'Calculate MACD (12,26,9).',             icon: '📉', execute: (p, d) => calcMACD(d) },
+  CALC_MACD_LEADER: { desc: 'Calculate MACD Leader (Zero-lag).',     icon: '⚡', execute: (p, d) => calcMACDLeader(d) },
+  CALC_SQUEEZE_MOMENTUM: { desc: 'Calculate Squeeze Momentum.',      icon: '🗜️', execute: (p, d) => calcSqueezeMomentum(d) },
+  CALC_VWAP:        { desc: 'Calculate Volume Weighted Avg Price.',  icon: '⚖️', execute: (p, d) => calcVWAP(d) },
   GET_MEMORY:       { desc: 'Retrieve past strategy performance.',   icon: '🧠', execute: (p, d, s) => getMemoryTool(s) },
 };
 
