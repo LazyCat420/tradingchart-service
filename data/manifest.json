@@ -13,5 +13,30 @@
         "image_path": "data/images/complex_scene.png",
         "prompt": "Describe this complex scene in detail. What are the main objects and colors? Can you read the large text visible?",
         "category": "General Description"
+    },
+    {
+        "image_path": "data/images/finviz_live.png",
+        "prompt": "This is a screenshot of the Finviz homepage. Can you identify the top gainer stock ticker and its percentage change? What is the general color trend (red vs green) of the heatmap squares on the right side?",
+        "category": "Live Screenshot: Finviz"
+    },
+    {
+        "image_path": "data/images/yahoo_live.png",
+        "prompt": "This is a screenshot of the Yahoo Finance homepage. Please extract the value of the S&P 500 index from the top ticker tape. Also, what is the main headline news article visible?",
+        "category": "Live Screenshot: Yahoo Finance"
+    },
+    {
+        "image_path": "data/images/dense_chart.png",
+        "prompt": "This is a dense 1-year trading chart for AAPL. It includes 50-day and 200-day moving averages, Volume, and RSI at the bottom. Please estimate the final RSI value at the very right edge of the chart. Also, is the 50-day SMA currently above or below the 200-day SMA?",
+        "category": "Edge Case: Extreme Density"
+    },
+    {
+        "image_path": "data/images/multi_panel.png",
+        "prompt": "This is a 2x2 multi-panel dashboard showing 4 different stocks. Look closely at all 4 quadrants. What is the approximate final price of GOOG (Alphabet)? What is the approximate final price of AMZN (Amazon)? Do not mix them up.",
+        "category": "Edge Case: Multi-Panel Confusion"
+    },
+    {
+        "image_path": "data/images/level2_overlay.png",
+        "prompt": "This image contains a trading chart and an overlaid Level 2 Order Book on the right side. Please read the order book. What is the price of the largest Bid size? What is the price of the largest Ask size?",
+        "category": "Edge Case: Information Overload"
     }
 ]

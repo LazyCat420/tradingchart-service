@@ -7,7 +7,12 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 os.makedirs("data/images", exist_ok=True)
-manifest = []
+manifest_path = "data/manifest.json"
+if os.path.exists(manifest_path):
+    with open(manifest_path, "r") as f:
+        manifest = json.load(f)
+else:
+    manifest = []
 
 print("Fetching real market data...")
 aapl = yf.Ticker('AAPL').history(start='2024-01-01', end='2024-12-31')

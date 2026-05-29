@@ -27,5 +27,6 @@ spec = {
   ],
   "analysis": "This is a mock analysis."
 }
-agentic_chart_benchmark.render_chart(df, spec, symbol)
+agentic_chart_benchmark.render_chart(df, spec, symbol, "3M Daily")
 print("Rendered mock chart.")
+
