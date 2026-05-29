@@ -1,0 +1,9 @@
+{
+  "name": "tradingchart-service",
+  "version": "1.0.0",
+  "description": "Trading Chart Service",
+  "scripts": {
+    "deploy": "bash deploy.sh",
+    "deploy:dry": "bash deploy.sh --dry-run"
+  }
+}

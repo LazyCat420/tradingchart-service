@@ -1,0 +1,7 @@
+node_modules
+__pycache__
+venv
+.venv
+.git
+.pytest_cache
+benchmark_charts/history

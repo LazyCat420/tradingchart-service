@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  tradingchart-service:
+    image: tradingchart-service:latest
+    container_name: tradingchart-service
+    ports:
+      - "8899:8899"
+      - "3000:3000"
+    restart: unless-stopped
+    volumes:
+      - ./benchmark_charts:/app/benchmark_charts
+    networks:
+      - sun_default
+
+networks:
+  sun_default:
+    external: true
