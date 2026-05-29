@@ -154,8 +154,8 @@ def test_agentic_tool_loop(page: Page):
     # Wait for the iteration to complete
     expect(page.locator(".sym").first).to_have_text("NVDA")
     
-    # Verify the tool log says 1 CALL
-    expect(page.locator("#tool-count-tag")).to_have_text(re.compile(r"1 CALL"))
+    # Verify the tool log says 4 CALLS
+    expect(page.locator("#tool-count-tag")).to_have_text(re.compile(r"4 CALLS"))
     
     # Verify the chart has been rendered (the tag updates with overlay count)
     expect(page.locator("#ov-tag")).to_contain_text("strat")

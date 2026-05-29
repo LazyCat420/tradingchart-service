@@ -9,5 +9,7 @@ mplfinance==0.12.10b0
 playwright==1.44.0
 pytest==8.2.1
 pytest-asyncio==0.23.7
+pytest-playwright==0.5.0
+
 
 

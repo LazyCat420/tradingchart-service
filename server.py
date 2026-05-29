@@ -5,6 +5,7 @@ Supports iterative strategy improvement: the LLM sees its own previous
 overlay specs and reasoning, then tries to improve on them.
 """
 import os
+import http
 import json
 import asyncio
 import time
